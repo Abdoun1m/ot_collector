@@ -2,24 +2,32 @@ package api
 
 import (
 	"context"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/Abdoun1m/ot_collector/internal/event"
+	"github.com/Abdoun1m/ot_collector/internal/filter"
 	"github.com/Abdoun1m/ot_collector/internal/sources"
 	"github.com/Abdoun1m/ot_collector/internal/storage"
+	webassets "github.com/Abdoun1m/ot_collector/web"
 )
 
 type StatsProvider interface {
 	Snapshot() map[string]any
 	SourceCounters() map[string]int64
+	Summary() map[string]any
+	Timeline() []map[string]any
+	Sources() []map[string]any
 }
 
 type Processor interface {
 	ProcessRaw(raw, sourceIP, transport string)
 	ProcessNormalized(evt event.Event)
+	CurrentFilterConfig() filter.Config
+	UpdateFilterConfig(cfg filter.Config) filter.Config
 }
 
 type API struct {
@@ -33,11 +41,12 @@ type API struct {
 	store        *storage.JSONLStore
 	stats        StatsProvider
 	processor    Processor
+	streamHub    *StreamHub
 	knownSources map[string]sources.SourceInfo
 	logger       *slog.Logger
 }
 
-func New(addr string, zone string, udpPort int, tcpPort int, apiPort int, eventsFile string, dmzEnabled bool, store *storage.JSONLStore, stats StatsProvider, processor Processor, logger *slog.Logger) *API {
+func New(addr string, zone string, udpPort int, tcpPort int, apiPort int, eventsFile string, dmzEnabled bool, store *storage.JSONLStore, stats StatsProvider, processor Processor, streamHub *StreamHub, logger *slog.Logger) *API {
 	return &API{
 		addr:         addr,
 		zone:         zone,
@@ -49,6 +58,7 @@ func New(addr string, zone string, udpPort int, tcpPort int, apiPort int, events
 		store:        store,
 		stats:        stats,
 		processor:    processor,
+		streamHub:    streamHub,
 		knownSources: sources.Known(),
 		logger:       logger,
 	}
@@ -58,9 +68,18 @@ func (a *API) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/events", a.handleEvents)
+	mux.HandleFunc("/events/stream", a.handleEventStream)
 	mux.HandleFunc("/sources", a.handleSources)
 	mux.HandleFunc("/stats", a.handleStats)
+	mux.HandleFunc("/stats/summary", a.handleStatsSummary)
+	mux.HandleFunc("/stats/timeline", a.handleStatsTimeline)
+	mux.HandleFunc("/filter/config", a.handleFilterConfig)
 	mux.HandleFunc("/test-event", a.handleTestEvent)
+
+	sub, err := fs.Sub(webassets.FS, ".")
+	if err == nil {
+		mux.Handle("/", http.FileServer(http.FS(sub)))
+	}
 
 	server := &http.Server{
 		Addr:              a.addr,

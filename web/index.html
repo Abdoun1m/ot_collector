@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DataProtect OT Collector</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title-wrap">
+        <h1>DataProtect OT Collector</h1>
+        <span id="status" class="status status-down">offline</span>
+      </div>
+      <div class="top-actions">
+        <span id="event-rate">0 ev/s</span>
+        <button id="toggle-stream" type="button">Pause Stream</button>
+        <button id="export-json" type="button">Export JSON</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel left">
+        <h2>Filters</h2>
+        <label>Source Type
+          <select id="filter-source">
+            <option value="">All</option>
+            <option value="plc">PLC</option>
+            <option value="scada">SCADA</option>
+            <option value="opcua">OPCUA</option>
+            <option value="ews">EWS</option>
+            <option value="firewall">FIREWALL</option>
+          </select>
+        </label>
+        <label>Severity
+          <select id="filter-severity">
+            <option value="">All</option>
+            <option value="debug">debug</option>
+            <option value="info">info</option>
+            <option value="warning">warning</option>
+            <option value="error">error</option>
+            <option value="critical">critical</option>
+          </select>
+        </label>
+        <label>Category
+          <select id="filter-category">
+            <option value="">All</option>
+            <option value="operator_action">operator_action</option>
+            <option value="operator_read">operator_read</option>
+            <option value="operator_write">operator_write</option>
+            <option value="security">security</option>
+            <option value="network">network</option>
+            <option value="system">system</option>
+            <option value="runtime">runtime</option>
+            <option value="communication">communication</option>
+            <option value="alarm">alarm</option>
+          </select>
+        </label>
+        <label>Asset IP
+          <input id="filter-asset" type="text" placeholder="192.168.1.62" />
+        </label>
+        <label>Search
+          <input id="filter-search" type="text" placeholder="NodeId=ns=2;i=..." />
+        </label>
+        <div class="button-row">
+          <button id="apply-filters" type="button">Apply</button>
+          <button id="reset-filters" type="button">Reset</button>
+        </div>
+
+        <h2>Filter Config</h2>
+        <label><input id="cfg-drop-reads" type="checkbox" /> Drop OPCUA READ noise</label>
+        <label><input id="cfg-dedup" type="checkbox" /> Drop duplicates</label>
+        <label>Sample Rate
+          <input id="cfg-sample-rate" type="number" min="0" max="1" step="0.05" />
+        </label>
+        <label>Rate Limit (ev/s/source)
+          <input id="cfg-rate-limit" type="number" min="0" step="10" />
+        </label>
+        <button id="save-filter-config" type="button">Save Config</button>
+      </aside>
+
+      <section class="panel center">
+        <div class="table-head">
+          <h2>Live Events</h2>
+          <span id="event-count">0 events</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Source</th>
+                <th>Asset</th>
+                <th>Severity</th>
+                <th>Category</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody id="events-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="panel right">
+        <h2>Summary</h2>
+        <pre id="summary-json" class="summary"></pre>
+        <canvas id="source-chart"></canvas>
+        <canvas id="severity-chart"></canvas>
+        <canvas id="timeline-chart"></canvas>
+      </aside>
+    </main>
+
+    <dialog id="event-dialog">
+      <h3>Event Details</h3>
+      <pre id="event-json"></pre>
+      <button id="close-dialog" type="button">Close</button>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>
+

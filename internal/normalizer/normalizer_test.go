@@ -19,8 +19,8 @@ func TestOPCUAReadCommandEnrichment(t *testing.T) {
 	}
 
 	evt := FromParsed("OT", parsed, "192.168.1.62")
-	if evt.EventCategory != "operator_action" {
-		t.Fatalf("expected operator_action, got %s", evt.EventCategory)
+	if evt.EventCategory != "operator_read" {
+		t.Fatalf("expected operator_read, got %s", evt.EventCategory)
 	}
 	if evt.Tags["opcua_operation"] != "READ" {
 		t.Fatalf("expected opcua_operation=READ, got %q", evt.Tags["opcua_operation"])
@@ -48,6 +48,20 @@ func TestOPCUAReadCommandEnrichment(t *testing.T) {
 	}
 	if evt.Tags["sensitive_action"] != "true" {
 		t.Fatalf("expected sensitive_action=true, got %q", evt.Tags["sensitive_action"])
+	}
+}
+
+func TestOPCUAWriteCommandCategory(t *testing.T) {
+	msg := `[OPCUA] [WRITE][CMD] User=admin NodeId=ns=2;i=1214 Browse=Vanne4 Display=Vanne4 Mode=MAINTAINED Value=true`
+	parsed := syslog.ParsedMessage{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Message:   msg,
+		Raw:       msg,
+		Format:    "raw",
+	}
+	evt := FromParsed("OT", parsed, "192.168.1.62")
+	if evt.EventCategory != "operator_write" {
+		t.Fatalf("expected operator_write, got %s", evt.EventCategory)
 	}
 }
 
@@ -123,4 +137,3 @@ func TestNonOPCUAFUXAUnchanged(t *testing.T) {
 func intPtr(v int) *int {
 	return &v
 }
-

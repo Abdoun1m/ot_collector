@@ -43,6 +43,12 @@ curl http://localhost:8088/health
 curl http://localhost:8088/events
 ```
 
+Open local observability UI:
+
+```bash
+http://localhost:8088/
+```
+
 Additional tests:
 
 ```bash
@@ -72,6 +78,53 @@ This container runs with `network_mode: none` and is expected to be manually att
 ## MES Safety
 
 This collector only observes, logs, and forwards events. It does not intercept or alter MES/OPC UA DMZ data flows.
+
+## Web UI and Live Stream
+
+The collector now serves a built-in local OT observability console from:
+
+- `GET /` -> web UI
+- `GET /events/stream` -> SSE event stream
+
+UI features:
+
+- real-time event table
+- server-side filters (`source_type`, `severity`, `category`, `asset_ip`, `search`)
+- summary and timeline charts
+- pause/resume stream and JSON export
+
+## Extended APIs
+
+- `GET /events?limit=100&source_type=opcua&category=operator_action&search=...`
+- `GET /events/stream`
+- `GET /stats/summary`
+- `GET /stats/timeline`
+- `GET /sources` (known + observed source activity)
+- `GET /filter/config`
+- `POST /filter/config`
+
+Example filter config payload:
+
+```json
+{
+  "drop_opcua_reads": true,
+  "drop_duplicates": true,
+  "sample_rate": 0.2,
+  "dedup_window_seconds": 5,
+  "max_events_per_second": 500,
+  "opcua_read_keep_every": 0
+}
+```
+
+## Load Reduction
+
+Load reduction is applied before storage and forwarding:
+
+- OPC UA READ sampling (WRITE commands are always kept)
+- duplicate suppression in a short time window
+- per-source event rate limiting
+
+This keeps ingestion resilient and reduces DMZ forwarding noise without changing the public event schema.
 
 ## OPC UA Command-Level Enrichment
 

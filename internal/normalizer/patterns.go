@@ -78,6 +78,10 @@ func classifyOPCUACategory(msg string) string {
 	l := strings.ToLower(msg)
 
 	switch {
+	case strings.Contains(u, "[READ][CMD]"):
+		return "operator_read"
+	case strings.Contains(u, "[WRITE][CMD]"):
+		return "operator_write"
 	case strings.Contains(u, "[CMD]"):
 		return "operator_action"
 	case strings.Contains(u, "[SESSION]"):
