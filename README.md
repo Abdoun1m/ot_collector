@@ -86,12 +86,23 @@ The collector now serves a built-in local OT observability console from:
 - `GET /` -> web UI
 - `GET /events/stream` -> SSE event stream
 
-UI features:
+UI sections:
 
-- real-time event table
-- server-side filters (`source_type`, `severity`, `category`, `asset_ip`, `search`)
-- summary and timeline charts
-- pause/resume stream and JSON export
+- Dashboard
+- Messages
+- Sources
+- Rule Matrix
+- Forwarding
+- Settings
+
+UI features include:
+
+- real-time event stream with pause/resume
+- dense message table with badges and JSON expansion
+- source CRUD with persistent config
+- rule matrix CRUD with first-match evaluation and sampling/drop/forward decisions
+- forwarding controls and connection test
+- summary KPIs and charts
 
 ## Extended APIs
 
@@ -102,6 +113,18 @@ UI features:
 - `GET /sources` (known + observed source activity)
 - `GET /filter/config`
 - `POST /filter/config`
+- `GET /config/sources`
+- `POST /config/sources`
+- `PUT /config/sources/{id}`
+- `DELETE /config/sources/{id}`
+- `GET /config/rules`
+- `POST /config/rules`
+- `PUT /config/rules/{id}`
+- `DELETE /config/rules/{id}`
+- `POST /config/rules/test`
+- `GET /config/forwarding`
+- `POST /config/forwarding`
+- `POST /forwarding/test`
 
 Example filter config payload:
 
@@ -120,9 +143,12 @@ Example filter config payload:
 
 Load reduction is applied before storage and forwarding:
 
-- OPC UA READ sampling (WRITE commands are always kept)
+- rule-driven keep/drop/sample/store_only/forward_only decisions
 - duplicate suppression in a short time window
 - per-source event rate limiting
+- decision tags added to stored events:
+  - `tags["collector_decision"]`
+  - `tags["matched_rule_id"]`
 
 This keeps ingestion resilient and reduces DMZ forwarding noise without changing the public event schema.
 

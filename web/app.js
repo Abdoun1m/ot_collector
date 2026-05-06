@@ -1,278 +1,340 @@
 const state = {
   events: [],
-  paused: false,
-  stream: null,
-  filters: {
-    source_type: "",
-    severity: "",
-    category: "",
-    asset_ip: "",
-    search: "",
-    limit: 200,
-  },
-  rateCounter: 0,
+  streamPaused: false,
+  es: null,
+  eps: 0,
+  sources: [],
+  rules: [],
+  forwarding: null,
+  filters: { limit: 200, source_type: "", asset_ip: "", severity: "", category: "", search: "" },
 };
-
-const MAX_ROWS = 1200;
 
 const el = {
-  status: document.getElementById("status"),
-  rate: document.getElementById("event-rate"),
-  eventsBody: document.getElementById("events-body"),
-  eventCount: document.getElementById("event-count"),
-  summaryJson: document.getElementById("summary-json"),
-  toggleStream: document.getElementById("toggle-stream"),
-  exportJson: document.getElementById("export-json"),
-  applyFilters: document.getElementById("apply-filters"),
-  resetFilters: document.getElementById("reset-filters"),
-  filterSource: document.getElementById("filter-source"),
-  filterSeverity: document.getElementById("filter-severity"),
-  filterCategory: document.getElementById("filter-category"),
-  filterAsset: document.getElementById("filter-asset"),
-  filterSearch: document.getElementById("filter-search"),
-  dialog: document.getElementById("event-dialog"),
-  dialogJson: document.getElementById("event-json"),
-  closeDialog: document.getElementById("close-dialog"),
-  cfgDropReads: document.getElementById("cfg-drop-reads"),
-  cfgDedup: document.getElementById("cfg-dedup"),
-  cfgSampleRate: document.getElementById("cfg-sample-rate"),
-  cfgRateLimit: document.getElementById("cfg-rate-limit"),
-  saveFilterConfig: document.getElementById("save-filter-config"),
+  healthPill: document.getElementById("health-pill"),
+  ratePill: document.getElementById("rate-pill"),
+  tabs: [...document.querySelectorAll(".tabs button")],
+  tabDashboard: document.getElementById("tab-dashboard"),
+  tabMessages: document.getElementById("tab-messages"),
+  tabSources: document.getElementById("tab-sources"),
+  tabRules: document.getElementById("tab-rules"),
+  tabForwarding: document.getElementById("tab-forwarding"),
+  tabSettings: document.getElementById("tab-settings"),
+  modal: document.getElementById("json-modal"),
+  modalBody: document.getElementById("json-modal-body"),
+  modalClose: document.getElementById("json-modal-close"),
 };
 
-let sourceChart;
-let severityChart;
-let timelineChart;
+let sourceChart; let categoryChart; let decisionChart; let timelineChart;
 
-function setStatus(up) {
-  el.status.textContent = up ? "online" : "offline";
-  el.status.classList.toggle("status-up", up);
-  el.status.classList.toggle("status-down", !up);
+function renderShell() {
+  el.tabDashboard.innerHTML = `
+    <div id="kpis" class="grid"></div>
+    <div class="grid">
+      <div class="card chart"><canvas id="c-source"></canvas></div>
+      <div class="card chart"><canvas id="c-category"></canvas></div>
+      <div class="card chart"><canvas id="c-decision"></canvas></div>
+      <div class="card full"><canvas id="c-timeline"></canvas></div>
+    </div>`;
+
+  el.tabMessages.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <select id="m-source"><option value="">source: all</option></select>
+        <input id="m-asset" placeholder="asset ip" class="mono" />
+        <select id="m-sev"><option value="">severity: all</option><option>info</option><option>warning</option><option>error</option><option>critical</option></select>
+        <select id="m-cat"><option value="">category: all</option><option>operator_action</option><option>operator_read</option><option>operator_write</option><option>security</option><option>network</option><option>system</option><option>runtime</option></select>
+        <input id="m-search" placeholder="search text" />
+        <button id="m-apply" class="primary">Apply</button>
+        <button id="m-pause">Pause Stream</button>
+        <button id="m-clear" class="ghost">Clear View</button>
+        <button id="m-export" class="ghost">Export JSON</button>
+      </div>
+      <table><thead><tr>
+        <th>timestamp</th><th>source</th><th>asset</th><th>severity</th><th>category</th><th>message</th>
+      </tr></thead><tbody id="m-tbody"></tbody></table>
+    </div>`;
+
+  el.tabSources.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <input id="s-search" placeholder="search sources" />
+        <button id="s-add" class="primary">+ Add Source</button>
+        <button id="s-save">Save Sources</button>
+        <button id="s-reset" class="ghost">Reset Defaults</button>
+      </div>
+      <table><thead><tr>
+        <th>Name</th><th>Type</th><th>IP Address</th><th>Protocol</th><th>Impact</th><th>Zone</th><th>State</th><th>Actions</th>
+      </tr></thead><tbody id="s-tbody"></tbody></table>
+    </div>`;
+
+  el.tabRules.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <button id="r-add" class="primary">+ Add Rule</button>
+        <button id="r-save">Save Rules</button>
+      </div>
+      <table><thead><tr>
+        <th>Enabled</th><th>Source Type</th><th>Asset</th><th>Category</th><th>Severity</th><th>Operation</th><th>Action</th><th>Sample Rate</th><th>Forward</th><th>Store</th><th>Notes</th><th>Actions</th>
+      </tr></thead><tbody id="r-tbody"></tbody></table>
+      <h3 style="margin-top:10px;">Rule Test</h3>
+      <textarea id="r-test-json" rows="6" placeholder='{"event":{"source_type":"opcua","event_category":"operator_action","tags":{"opcua_operation":"READ"}}}'></textarea>
+      <div class="toolbar">
+        <button id="r-test" class="primary">Test Rule</button>
+        <pre id="r-test-out"></pre>
+      </div>
+    </div>`;
+
+  el.tabForwarding.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <input id="f-url" class="mono" placeholder="DMZ Collector URL" />
+        <label><input type="checkbox" id="f-enabled" /> forwarding enabled</label>
+        <label><input type="checkbox" id="f-only-filtered" /> forward only filtered events</label>
+      </div>
+      <div class="toolbar">
+        <button id="f-save" class="primary">Save Forwarding</button>
+        <button id="f-test">Test Connection</button>
+      </div>
+      <pre id="f-state"></pre>
+    </div>`;
+
+  el.tabSettings.innerHTML = `<div class="card"><h3>Settings</h3><p>Collector settings are managed via API and compose env.</p></div>`;
 }
 
-function qs(params) {
-  const u = new URLSearchParams();
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== "" && v != null) u.set(k, String(v));
+function switchTab(name) {
+  [...document.querySelectorAll(".tab")].forEach((n) => n.classList.remove("active"));
+  [...document.querySelectorAll(".tabs button")].forEach((n) => n.classList.remove("active"));
+  document.getElementById(`tab-${name}`).classList.add("active");
+  document.querySelector(`.tabs button[data-tab="${name}"]`).classList.add("active");
+}
+
+function bindTabs() { el.tabs.forEach((b) => b.onclick = () => switchTab(b.dataset.tab)); }
+
+async function j(url, opt) { const r = await fetch(url, opt); if (!r.ok) throw new Error(`${r.status}`); return r.json(); }
+
+function renderMessages() {
+  const tbody = document.getElementById("m-tbody");
+  tbody.innerHTML = state.events.slice(-400).reverse().map((e, i) => `
+    <tr data-i="${i}">
+      <td class="mono">${esc(e.timestamp || "")}</td>
+      <td><span class="badge">${esc(e.source_type || "")}</span></td>
+      <td>${esc(e.asset_name || "")}<br/><span class="mono">${esc(e.asset_ip || "")}</span></td>
+      <td class="sev-${esc((e.severity || "info").toLowerCase())}">${esc(e.severity || "")}</td>
+      <td>${esc(e.event_category || "")}</td>
+      <td>${esc(e.message || "")}</td>
+    </tr>
+  `).join("");
+  tbody.onclick = (ev) => {
+    const tr = ev.target.closest("tr[data-i]"); if (!tr) return;
+    const idx = Number(tr.dataset.i); const item = state.events.slice(-400).reverse()[idx];
+    el.modalBody.textContent = JSON.stringify(item, null, 2); el.modal.showModal();
+  };
+}
+
+function renderSources() {
+  const q = (document.getElementById("s-search")?.value || "").toLowerCase();
+  const tbody = document.getElementById("s-tbody");
+  const rows = state.sources.filter((s) => JSON.stringify(s).toLowerCase().includes(q));
+  tbody.innerHTML = rows.map((s, idx) => `
+    <tr>
+      <td><input data-f="name" data-i="${idx}" value="${escAttr(s.name || "")}" /></td>
+      <td><input data-f="type" data-i="${idx}" value="${escAttr(s.type || "")}" /></td>
+      <td><input data-f="ip" data-i="${idx}" class="mono" value="${escAttr(s.ip || "")}" /></td>
+      <td><input data-f="protocol" data-i="${idx}" value="${escAttr(s.protocol || "syslog")}" /></td>
+      <td><input data-f="impact" data-i="${idx}" value="${escAttr(s.impact || "")}" /></td>
+      <td><input data-f="zone" data-i="${idx}" value="${escAttr(s.zone || "")}" /></td>
+      <td><label><input type="checkbox" data-f="enabled" data-i="${idx}" ${s.enabled ? "checked" : ""}/> enabled</label></td>
+      <td><button data-del="${idx}">Delete</button></td>
+    </tr>`).join("");
+  tbody.querySelectorAll("input").forEach((inp) => {
+    inp.onchange = () => {
+      const i = Number(inp.dataset.i), f = inp.dataset.f;
+      state.sources[i][f] = inp.type === "checkbox" ? inp.checked : inp.value;
+    };
   });
-  return u.toString();
+  tbody.querySelectorAll("button[data-del]").forEach((b) => b.onclick = () => {
+    state.sources.splice(Number(b.dataset.del), 1); renderSources();
+  });
 }
 
-async function loadEvents() {
-  const res = await fetch(`/events?${qs(state.filters)}`);
-  const data = await res.json();
-  state.events = data;
-  renderEvents();
+function renderRules() {
+  const tbody = document.getElementById("r-tbody");
+  tbody.innerHTML = state.rules.map((r, idx) => `
+    <tr>
+      <td><input type="checkbox" data-f="enabled" data-i="${idx}" ${r.enabled ? "checked" : ""}></td>
+      <td><input data-f="source_type" data-i="${idx}" value="${escAttr(r.source_type || "*")}"></td>
+      <td><input data-f="asset" data-i="${idx}" value="${escAttr(r.asset || "*")}"></td>
+      <td><input data-f="category" data-i="${idx}" value="${escAttr(r.category || "*")}"></td>
+      <td><input data-f="severity" data-i="${idx}" value="${escAttr(r.severity || "*")}"></td>
+      <td><input data-f="operation" data-i="${idx}" value="${escAttr(r.operation || "*")}"></td>
+      <td><select data-f="action" data-i="${idx}">${["keep","drop","sample","forward_only","store_only"].map((a)=>`<option ${r.action===a?"selected":""}>${a}</option>`).join("")}</select></td>
+      <td><input type="number" min="0" max="1" step="0.05" data-f="sample_rate" data-i="${idx}" value="${Number(r.sample_rate || 1)}"></td>
+      <td><input type="checkbox" data-f="forward_to_dmz" data-i="${idx}" ${r.forward_to_dmz ? "checked" : ""}></td>
+      <td><input type="checkbox" data-f="store_locally" data-i="${idx}" ${r.store_locally ? "checked" : ""}></td>
+      <td><input data-f="notes" data-i="${idx}" value="${escAttr(r.notes || "")}"></td>
+      <td><button data-up="${idx}">↑</button><button data-down="${idx}">↓</button><button data-del="${idx}">Del</button></td>
+    </tr>`).join("");
+  tbody.querySelectorAll("input,select").forEach((inp) => {
+    inp.onchange = () => {
+      const i = Number(inp.dataset.i), f = inp.dataset.f;
+      state.rules[i][f] = inp.type === "checkbox" ? inp.checked : (inp.type === "number" ? Number(inp.value) : inp.value);
+    };
+  });
+  tbody.querySelectorAll("button[data-up]").forEach((b) => b.onclick = () => moveRule(Number(b.dataset.up), -1));
+  tbody.querySelectorAll("button[data-down]").forEach((b) => b.onclick = () => moveRule(Number(b.dataset.down), +1));
+  tbody.querySelectorAll("button[data-del]").forEach((b) => b.onclick = () => { state.rules.splice(Number(b.dataset.del), 1); renderRules(); });
 }
 
-function renderEvents() {
-  const rows = state.events.slice(-MAX_ROWS).reverse();
-  el.eventsBody.innerHTML = rows
-    .map((e) => {
-      const sev = (e.severity || "info").toLowerCase();
-      const msg = escapeHtml(e.message || "");
-      return `<tr data-event='${escapeAttr(JSON.stringify(e))}'>
-        <td>${escapeHtml(e.timestamp || "")}</td>
-        <td>${escapeHtml(e.source_type || "")}</td>
-        <td>${escapeHtml(e.asset_name || "")}</td>
-        <td class="sev-${sev}">${escapeHtml(e.severity || "")}</td>
-        <td>${escapeHtml(e.event_category || "")}</td>
-        <td>${msg}</td>
-      </tr>`;
-    })
-    .join("");
-  el.eventCount.textContent = `${rows.length} events`;
+function moveRule(i, d) {
+  const j = i + d; if (j < 0 || j >= state.rules.length) return;
+  const t = state.rules[i]; state.rules[i] = state.rules[j]; state.rules[j] = t; renderRules();
+}
+
+function renderForwarding() {
+  if (!state.forwarding) return;
+  document.getElementById("f-url").value = state.forwarding.dmz_collector_url || "";
+  document.getElementById("f-enabled").checked = !!state.forwarding.enabled;
+  document.getElementById("f-only-filtered").checked = !!state.forwarding.forward_only_filtered_events;
+  document.getElementById("f-state").textContent = JSON.stringify(state.forwarding, null, 2);
+}
+
+function renderDashboard(summary, timeline) {
+  const kpis = document.getElementById("kpis");
+  kpis.innerHTML = [
+    ["total events", summary.total_events || 0],
+    ["event rate/sec", summary.event_rate_per_second || 0],
+    ["forwarded", summary.forwarded_count || 0],
+    ["dropped", summary.dropped_count || 0],
+    ["sampled", summary.sampled_count || 0],
+    ["critical+security", (summary.by_category?.security || 0) + (summary.by_severity?.critical || 0)],
+  ].map(([k,v]) => `<div class="card kpi"><h2>${k}</h2><div class="v">${v}</div></div>`).join("");
+
+  const srcLabels = Object.keys(summary.by_source_type || {}), srcVals = Object.values(summary.by_source_type || {});
+  const catLabels = Object.keys(summary.by_category || {}), catVals = Object.values(summary.by_category || {});
+  const decLabels = Object.keys(summary.by_decision || {}), decVals = Object.values(summary.by_decision || {});
+  const tLabels = (timeline || []).map((x) => (x.timestamp || "").slice(11,16));
+  const tVals = (timeline || []).map((x) => x.count || 0);
+
+  if (sourceChart) sourceChart.destroy();
+  if (categoryChart) categoryChart.destroy();
+  if (decisionChart) decisionChart.destroy();
+  if (timelineChart) timelineChart.destroy();
+  sourceChart = new Chart(document.getElementById("c-source"), { type: "pie", data: { labels: srcLabels, datasets: [{ data: srcVals }] } });
+  categoryChart = new Chart(document.getElementById("c-category"), { type: "bar", data: { labels: catLabels, datasets: [{ data: catVals }] } });
+  decisionChart = new Chart(document.getElementById("c-decision"), { type: "bar", data: { labels: decLabels, datasets: [{ data: decVals }] } });
+  timelineChart = new Chart(document.getElementById("c-timeline"), { type: "line", data: { labels: tLabels, datasets: [{ data: tVals }] } });
+}
+
+async function loadAll() {
+  const [health, events, sources, rules, forwarding, summary, timeline] = await Promise.all([
+    j("/health"), j(`/events?${new URLSearchParams(state.filters)}`), j("/config/sources"), j("/config/rules"), j("/config/forwarding"), j("/stats/summary"), j("/stats/timeline")
+  ]);
+  setHealth(health.status === "ok");
+  state.events = events;
+  state.sources = sources;
+  state.rules = rules;
+  state.forwarding = forwarding;
+  renderMessages(); renderSources(); renderRules(); renderForwarding(); renderDashboard(summary, timeline);
+  hydrateMessageSourceFilter();
+}
+
+function hydrateMessageSourceFilter() {
+  const s = document.getElementById("m-source");
+  if (!s) return;
+  s.innerHTML = `<option value="">source: all</option>` + [...new Set(state.sources.map((x) => x.type).filter(Boolean))].map((t) => `<option>${t}</option>`).join("");
+}
+
+function bind() {
+  bindTabs();
+  el.modalClose.onclick = () => el.modal.close();
+
+  document.getElementById("m-apply").onclick = async () => {
+    state.filters.source_type = document.getElementById("m-source").value.trim();
+    state.filters.asset_ip = document.getElementById("m-asset").value.trim();
+    state.filters.severity = document.getElementById("m-sev").value.trim();
+    state.filters.category = document.getElementById("m-cat").value.trim();
+    state.filters.search = document.getElementById("m-search").value.trim();
+    state.events = await j(`/events?${new URLSearchParams(state.filters)}`);
+    renderMessages();
+  };
+  document.getElementById("m-clear").onclick = () => { state.events = []; renderMessages(); };
+  document.getElementById("m-pause").onclick = (ev) => {
+    state.streamPaused = !state.streamPaused;
+    ev.target.textContent = state.streamPaused ? "Resume Stream" : "Pause Stream";
+  };
+  document.getElementById("m-export").onclick = () => {
+    const blob = new Blob([JSON.stringify(state.events, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "filtered-events.json"; a.click();
+  };
+
+  document.getElementById("s-search").oninput = renderSources;
+  document.getElementById("s-add").onclick = () => {
+    state.sources.push({ id: `src-${Date.now()}`, name: "New Source", type: "unknown", ip: "", protocol: "syslog", impact: "medium", zone: "L2", enabled: true, forward_enabled: true, notes: "" });
+    renderSources();
+  };
+  document.getElementById("s-save").onclick = async () => { await j("/config/sources", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(state.sources) }); await loadAll(); };
+  document.getElementById("s-reset").onclick = async () => { await j("/config/sources", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify([]) }); await loadAll(); };
+
+  document.getElementById("r-add").onclick = () => {
+    state.rules.push({ id: `rule-${Date.now()}`, enabled: true, source_type: "*", asset: "*", category: "*", severity: "*", operation: "*", action: "keep", sample_rate: 1, forward_to_dmz: false, store_locally: true, notes: "" });
+    renderRules();
+  };
+  document.getElementById("r-save").onclick = async () => { await j("/config/rules", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(state.rules) }); await loadAll(); };
+  document.getElementById("r-test").onclick = async () => {
+    const payload = JSON.parse(document.getElementById("r-test-json").value || "{}");
+    const out = await j("/config/rules/test", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+    document.getElementById("r-test-out").textContent = JSON.stringify(out, null, 2);
+  };
+
+  document.getElementById("f-save").onclick = async () => {
+    state.forwarding.dmz_collector_url = document.getElementById("f-url").value.trim();
+    state.forwarding.enabled = document.getElementById("f-enabled").checked;
+    state.forwarding.forward_only_filtered_events = document.getElementById("f-only-filtered").checked;
+    await j("/config/forwarding", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(state.forwarding) });
+    await loadAll();
+  };
+  document.getElementById("f-test").onclick = async () => {
+    const out = await j("/forwarding/test", { method: "POST" }).catch((e) => ({ error: String(e) }));
+    document.getElementById("f-state").textContent = JSON.stringify(out, null, 2);
+  };
 }
 
 function connectStream() {
-  if (state.stream) state.stream.close();
-  state.stream = new EventSource("/events/stream");
-
-  state.stream.onopen = () => setStatus(true);
-  state.stream.onerror = () => setStatus(false);
-
-  state.stream.addEventListener("event", (ev) => {
-    if (state.paused) return;
-    state.rateCounter += 1;
-    const data = JSON.parse(ev.data);
-    if (!matchesActiveFilters(data)) return;
-    state.events.push(data);
-    if (state.events.length > MAX_ROWS) state.events.shift();
-    renderEvents();
+  if (state.es) state.es.close();
+  state.es = new EventSource("/events/stream");
+  state.es.onopen = () => setHealth(true);
+  state.es.onerror = () => setHealth(false);
+  state.es.addEventListener("event", (ev) => {
+    if (state.streamPaused) return;
+    state.eps++;
+    const item = JSON.parse(ev.data);
+    state.events.push(item);
+    if (state.events.length > 3000) state.events.shift();
+    renderMessages();
   });
 }
 
-function matchesActiveFilters(e) {
-  if (state.filters.source_type && e.source_type !== state.filters.source_type) return false;
-  if (state.filters.severity && e.severity !== state.filters.severity) return false;
-  if (state.filters.category && e.event_category !== state.filters.category) return false;
-  if (state.filters.asset_ip && e.asset_ip !== state.filters.asset_ip) return false;
-  if (state.filters.search) {
-    const s = state.filters.search.toLowerCase();
-    const blob = JSON.stringify(e).toLowerCase();
-    if (!blob.includes(s)) return false;
-  }
-  return true;
+function setHealth(ok) {
+  el.healthPill.classList.toggle("online", ok);
+  el.healthPill.classList.toggle("offline", !ok);
+  el.healthPill.textContent = ok ? "online" : "offline";
 }
 
-async function refreshStats() {
-  const [summaryRes, timelineRes] = await Promise.all([
-    fetch("/stats/summary"),
-    fetch("/stats/timeline"),
-  ]);
-  const summary = await summaryRes.json();
-  const timeline = await timelineRes.json();
-
-  el.summaryJson.textContent = JSON.stringify(summary, null, 2);
-  renderCharts(summary, timeline);
-}
-
-function renderCharts(summary, timeline) {
-  const sourceLabels = Object.keys(summary.by_source_type || {});
-  const sourceValues = Object.values(summary.by_source_type || {});
-  const severityLabels = Object.keys(summary.by_severity || {});
-  const severityValues = Object.values(summary.by_severity || {});
-  const timelineLabels = timeline.map((x) => x.timestamp.slice(11, 16));
-  const timelineValues = timeline.map((x) => x.count);
-
-  if (sourceChart) sourceChart.destroy();
-  sourceChart = new Chart(document.getElementById("source-chart"), {
-    type: "pie",
-    data: {
-      labels: sourceLabels,
-      datasets: [{ data: sourceValues }],
-    },
-  });
-
-  if (severityChart) severityChart.destroy();
-  severityChart = new Chart(document.getElementById("severity-chart"), {
-    type: "bar",
-    data: {
-      labels: severityLabels,
-      datasets: [{ data: severityValues }],
-    },
-  });
-
-  if (timelineChart) timelineChart.destroy();
-  timelineChart = new Chart(document.getElementById("timeline-chart"), {
-    type: "line",
-    data: {
-      labels: timelineLabels,
-      datasets: [{ data: timelineValues }],
-    },
-    options: { responsive: true, maintainAspectRatio: false },
-  });
-}
-
-async function loadFilterConfig() {
-  const res = await fetch("/filter/config");
-  const cfg = await res.json();
-  el.cfgDropReads.checked = !!cfg.drop_opcua_reads;
-  el.cfgDedup.checked = !!cfg.drop_duplicates;
-  el.cfgSampleRate.value = Number(cfg.sample_rate ?? 0.2);
-  el.cfgRateLimit.value = Number(cfg.max_events_per_second ?? 500);
-}
-
-async function saveFilterConfig() {
-  const payload = {
-    drop_opcua_reads: el.cfgDropReads.checked,
-    drop_duplicates: el.cfgDedup.checked,
-    sample_rate: Number(el.cfgSampleRate.value || 0),
-    dedup_window_seconds: 5,
-    max_events_per_second: Number(el.cfgRateLimit.value || 0),
-    opcua_read_keep_every: 0,
-  };
-  await fetch("/filter/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-}
-
-function bindActions() {
-  el.applyFilters.addEventListener("click", () => {
-    state.filters.source_type = el.filterSource.value.trim();
-    state.filters.severity = el.filterSeverity.value.trim();
-    state.filters.category = el.filterCategory.value.trim();
-    state.filters.asset_ip = el.filterAsset.value.trim();
-    state.filters.search = el.filterSearch.value.trim();
-    loadEvents().catch(console.error);
-  });
-
-  el.resetFilters.addEventListener("click", () => {
-    el.filterSource.value = "";
-    el.filterSeverity.value = "";
-    el.filterCategory.value = "";
-    el.filterAsset.value = "";
-    el.filterSearch.value = "";
-    state.filters.source_type = "";
-    state.filters.severity = "";
-    state.filters.category = "";
-    state.filters.asset_ip = "";
-    state.filters.search = "";
-    loadEvents().catch(console.error);
-  });
-
-  el.toggleStream.addEventListener("click", () => {
-    state.paused = !state.paused;
-    el.toggleStream.textContent = state.paused ? "Resume Stream" : "Pause Stream";
-  });
-
-  el.exportJson.addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify(state.events, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "ot-events.json";
-    a.click();
-    URL.revokeObjectURL(url);
-  });
-
-  el.eventsBody.addEventListener("click", (ev) => {
-    const row = ev.target.closest("tr[data-event]");
-    if (!row) return;
-    const raw = row.getAttribute("data-event");
-    const item = JSON.parse(raw);
-    el.dialogJson.textContent = JSON.stringify(item, null, 2);
-    el.dialog.showModal();
-  });
-
-  el.closeDialog.addEventListener("click", () => el.dialog.close());
-  el.saveFilterConfig.addEventListener("click", () => {
-    saveFilterConfig().catch(console.error);
-  });
-}
-
-setInterval(() => {
-  el.rate.textContent = `${state.rateCounter} ev/s`;
-  state.rateCounter = 0;
-}, 1000);
-
-setInterval(() => {
-  refreshStats().catch(console.error);
+setInterval(() => { el.ratePill.textContent = `${state.eps} ev/s`; state.eps = 0; }, 1000);
+setInterval(async () => {
+  const [summary, timeline] = await Promise.all([j("/stats/summary"), j("/stats/timeline")]).catch(() => [null, null]);
+  if (summary && timeline) renderDashboard(summary, timeline);
 }, 5000);
 
-function escapeHtml(s) {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
+function esc(s) { return String(s || "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;"); }
+function escAttr(s) { return esc(s).replaceAll("\n", " "); }
 
-function escapeAttr(s) {
-  return s.replaceAll("&", "&amp;").replaceAll("'", "&#39;");
-}
-
-async function bootstrap() {
-  bindActions();
-  await Promise.all([loadEvents(), refreshStats(), loadFilterConfig()]);
+async function boot() {
+  renderShell();
+  bind();
+  await loadAll();
   connectStream();
 }
 
-bootstrap().catch((err) => {
-  console.error(err);
-  setStatus(false);
-});
+boot().catch((e) => { console.error(e); setHealth(false); });
 

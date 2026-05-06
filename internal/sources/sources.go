@@ -1,6 +1,10 @@
 package sources
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Abdoun1m/ot_collector/internal/config"
+)
 
 type SourceInfo struct {
 	AssetName  string `json:"asset_name"`
@@ -20,7 +24,29 @@ var assetByIP = map[string]SourceInfo{
 	"192.168.1.254": {AssetName: "ot_firewall", SourceType: "firewall", AssetIP: "192.168.1.254"},
 }
 
-func Resolve(ip, host, app, message string) SourceInfo {
+type Resolver struct {
+	store *config.SourceStore
+}
+
+var defaultResolver *Resolver
+
+func NewResolver(store *config.SourceStore) *Resolver {
+	return &Resolver{store: store}
+}
+
+func SetDefaultResolver(r *Resolver) {
+	defaultResolver = r
+}
+
+func (r *Resolver) Resolve(ip, host, app, message string) SourceInfo {
+	if r == nil || r.store == nil {
+		return r.resolveFallback(ip, host, app, message)
+	}
+	for _, src := range r.store.All() {
+		if src.Enabled && src.IP == ip {
+			return SourceInfo{AssetName: src.Name, SourceType: src.Type, AssetIP: src.IP}
+		}
+	}
 	if s, ok := assetByIP[ip]; ok {
 		return s
 	}
@@ -38,7 +64,37 @@ func Resolve(ip, host, app, message string) SourceInfo {
 	}
 }
 
+func (r *Resolver) Known() map[string]SourceInfo {
+	if r == nil || r.store == nil {
+		out := make(map[string]SourceInfo, len(assetByIP))
+		for k, v := range assetByIP {
+			out[k] = v
+		}
+		return out
+	}
+	all := r.store.All()
+	out := make(map[string]SourceInfo, len(all))
+	for _, s := range all {
+		out[s.IP] = SourceInfo{
+			AssetName:  s.Name,
+			SourceType: s.Type,
+			AssetIP:    s.IP,
+		}
+	}
+	return out
+}
+
+func Resolve(ip, host, app, message string) SourceInfo {
+	if defaultResolver != nil {
+		return defaultResolver.Resolve(ip, host, app, message)
+	}
+	return (&Resolver{store: nil}).resolveFallback(ip, host, app, message)
+}
+
 func Known() map[string]SourceInfo {
+	if defaultResolver != nil {
+		return defaultResolver.Known()
+	}
 	out := make(map[string]SourceInfo, len(assetByIP))
 	for k, v := range assetByIP {
 		out[k] = v
@@ -46,3 +102,19 @@ func Known() map[string]SourceInfo {
 	return out
 }
 
+func (r *Resolver) resolveFallback(ip, host, app, message string) SourceInfo {
+	if s, ok := assetByIP[ip]; ok {
+		return s
+	}
+	h := strings.ToLower(host + " " + app + " " + message)
+	switch {
+	case strings.Contains(h, "fuxa"):
+		return SourceInfo{AssetName: "labshock_scada", SourceType: "scada", AssetIP: ip}
+	case strings.Contains(h, "openplc"):
+		return SourceInfo{AssetName: "unknown", SourceType: "plc", AssetIP: ip}
+	case strings.Contains(h, "opcua") || strings.Contains(h, "powergrid_opcua_server") || strings.Contains(h, "powergrid-opcua"):
+		return SourceInfo{AssetName: "powergrid_opcua_server", SourceType: "opcua", AssetIP: ip}
+	default:
+		return SourceInfo{AssetName: "unknown", SourceType: "unknown", AssetIP: ip}
+	}
+}

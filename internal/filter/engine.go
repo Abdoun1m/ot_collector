@@ -1,21 +1,22 @@
 package filter
 
 import (
-	"math"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Abdoun1m/ot_collector/internal/config"
 	"github.com/Abdoun1m/ot_collector/internal/event"
 )
 
-type Config struct {
-	DropOPCUAReads    bool    `json:"drop_opcua_reads"`
-	DropDuplicates    bool    `json:"drop_duplicates"`
-	SampleRate        float64 `json:"sample_rate"`
-	DedupWindowSec    int     `json:"dedup_window_seconds"`
-	MaxEventsPerSec   int     `json:"max_events_per_second"`
-	OPCUAReadKeepEvery int    `json:"opcua_read_keep_every"`
+type Decision struct {
+	Store         bool   `json:"store"`
+	Forward       bool   `json:"forward"`
+	Show          bool   `json:"show"`
+	Drop          bool   `json:"drop"`
+	Sampled       bool   `json:"sampled"`
+	MatchedRuleID string `json:"matched_rule_id"`
+	Reason        string `json:"decision_reason"`
 }
 
 type rateState struct {
@@ -30,76 +31,73 @@ type dupState struct {
 type Engine struct {
 	mu sync.RWMutex
 
-	cfg Config
+	maxEventsPerSec int
+	dedupWindowSec  int
+	debugStoreDrop  bool
 
-	stateMu          sync.Mutex
-	opcuaReadCounter map[string]int
-	dedupCache       map[string]dupState
-	rateBySource     map[string]rateState
+	rules []config.RuleConfig
+
+	stateMu      sync.Mutex
+	dedupCache   map[string]dupState
+	rateBySource map[string]rateState
+	sampleCounts map[string]int
 }
 
 func New() *Engine {
 	return &Engine{
-		cfg: DefaultConfig(),
-		opcuaReadCounter: map[string]int{},
-		dedupCache:       map[string]dupState{},
-		rateBySource:     map[string]rateState{},
+		maxEventsPerSec: 800,
+		dedupWindowSec:  5,
+		rules:           []config.RuleConfig{},
+		dedupCache:      map[string]dupState{},
+		rateBySource:    map[string]rateState{},
+		sampleCounts:    map[string]int{},
 	}
 }
 
-func DefaultConfig() Config {
-	return Config{
-		DropOPCUAReads:    true,
-		DropDuplicates:    true,
-		SampleRate:        0.2,
-		DedupWindowSec:    5,
-		MaxEventsPerSec:   500,
-		OPCUAReadKeepEvery: 0,
-	}
-}
-
-func (e *Engine) Update(cfg Config) Config {
+func (e *Engine) ConfigureRuntime(maxEventsPerSec, dedupWindowSec int, debugStoreDrop bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	if cfg.SampleRate < 0 {
-		cfg.SampleRate = 0
+	if maxEventsPerSec >= 0 {
+		e.maxEventsPerSec = maxEventsPerSec
 	}
-	if cfg.SampleRate > 1 {
-		cfg.SampleRate = 1
+	if dedupWindowSec >= 0 {
+		e.dedupWindowSec = dedupWindowSec
 	}
-	if cfg.DedupWindowSec < 0 {
-		cfg.DedupWindowSec = 0
-	}
-	if cfg.MaxEventsPerSec < 0 {
-		cfg.MaxEventsPerSec = 0
-	}
-	if cfg.OPCUAReadKeepEvery < 0 {
-		cfg.OPCUAReadKeepEvery = 0
-	}
-
-	e.cfg = cfg
-	return e.cfg
+	e.debugStoreDrop = debugStoreDrop
 }
 
-func (e *Engine) Current() Config {
+func (e *Engine) SetRules(rules []config.RuleConfig) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rules = make([]config.RuleConfig, len(rules))
+	copy(e.rules, rules)
+}
+
+func (e *Engine) Rules() []config.RuleConfig {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.cfg
+	out := make([]config.RuleConfig, len(e.rules))
+	copy(out, e.rules)
+	return out
 }
 
-func (e *Engine) ShouldDrop(evt *event.Event) (bool, string) {
+func (e *Engine) Evaluate(evt *event.Event) Decision {
 	if evt == nil {
-		return false, ""
+		return Decision{Store: true, Show: true, Drop: false, Reason: "nil_event_default"}
 	}
-
-	cfg := e.Current()
 	now := time.Now().UTC()
+	e.mu.RLock()
+	rules := make([]config.RuleConfig, len(e.rules))
+	copy(rules, e.rules)
+	maxEps := e.maxEventsPerSec
+	dedupSec := e.dedupWindowSec
+	debugStoreDrop := e.debugStoreDrop
+	e.mu.RUnlock()
 
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 
-	if cfg.MaxEventsPerSec > 0 {
+	if maxEps > 0 {
 		sourceKey := evt.AssetIP
 		if sourceKey == "" {
 			sourceKey = evt.SourceType
@@ -112,74 +110,92 @@ func (e *Engine) ShouldDrop(evt *event.Event) (bool, string) {
 		}
 		rs.count++
 		e.rateBySource[sourceKey] = rs
-		if rs.count > cfg.MaxEventsPerSec {
-			return true, "rate_limit"
+		if rs.count > maxEps {
+			return e.dropDecision("rate_limit", "", debugStoreDrop)
 		}
 	}
 
-	if cfg.DropDuplicates && cfg.DedupWindowSec > 0 {
+	if dedupSec > 0 {
 		dupKey := strings.Join([]string{evt.AssetIP, evt.SourceType, evt.Message}, "|")
-		if ds, ok := e.dedupCache[dupKey]; ok {
-			if now.Sub(ds.lastSeen) <= time.Duration(cfg.DedupWindowSec)*time.Second {
-				e.dedupCache[dupKey] = dupState{lastSeen: now}
-				return true, "duplicate"
-			}
+		if ds, ok := e.dedupCache[dupKey]; ok && now.Sub(ds.lastSeen) <= time.Duration(dedupSec)*time.Second {
+			e.dedupCache[dupKey] = dupState{lastSeen: now}
+			return e.dropDecision("duplicate_window", "", debugStoreDrop)
 		}
 		e.dedupCache[dupKey] = dupState{lastSeen: now}
 	}
 
-	if cfg.DropOPCUAReads && isOPCUARead(evt) {
-		if evt.Tags == nil {
-			evt.Tags = map[string]string{}
+	operation := strings.ToUpper(evt.Tags["opcua_operation"])
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
 		}
-		evt.Tags["opcua_noise"] = "true"
-
-		keepEvery := cfg.OPCUAReadKeepEvery
-		if keepEvery <= 0 {
-			keepEvery = sampleToKeepEvery(cfg.SampleRate)
+		if !matchField(rule.SourceType, evt.SourceType) {
+			continue
 		}
-		if keepEvery <= 1 {
-			return false, ""
+		if !matchField(rule.Asset, evt.AssetName) && !matchField(rule.Asset, evt.AssetIP) {
+			continue
+		}
+		if !matchField(rule.Category, evt.EventCategory) {
+			continue
+		}
+		if !matchField(rule.Severity, evt.Severity) {
+			continue
+		}
+		if !matchField(rule.Operation, operation) {
+			continue
 		}
 
-		key := strings.Join([]string{
-			evt.AssetIP,
-			evt.Tags["user"],
-			evt.Tags["node_id"],
-			evt.Tags["browse_name"],
-			evt.Tags["mode"],
-			evt.Tags["value"],
-		}, "|")
-
-		e.opcuaReadCounter[key]++
-		c := e.opcuaReadCounter[key]
-		if c%keepEvery != 1 {
-			return true, "opcua_read_sample"
+		switch strings.ToLower(rule.Action) {
+		case "drop":
+			return e.dropDecision("rule_drop", rule.ID, debugStoreDrop)
+		case "forward_only":
+			return Decision{Store: false, Forward: true, Show: true, Drop: false, MatchedRuleID: rule.ID, Reason: "rule_forward_only"}
+		case "store_only":
+			return Decision{Store: true, Forward: false, Show: true, Drop: false, MatchedRuleID: rule.ID, Reason: "rule_store_only"}
+		case "sample":
+			rate := rule.SampleRate
+			if rate <= 0 {
+				rate = 0.1
+			}
+			keepEvery := sampleToKeepEvery(rate)
+			key := strings.Join([]string{rule.ID, evt.AssetIP, evt.AssetName, evt.EventCategory, evt.Message}, "|")
+			e.sampleCounts[key]++
+			if keepEvery <= 1 || e.sampleCounts[key]%keepEvery == 1 {
+				return Decision{Store: rule.StoreLocally, Forward: rule.ForwardToDMZ, Show: true, Drop: false, Sampled: true, MatchedRuleID: rule.ID, Reason: "rule_sample_keep"}
+			}
+			return e.dropDecision("rule_sample_drop", rule.ID, debugStoreDrop)
+		default: // keep
+			return Decision{Store: rule.StoreLocally, Forward: rule.ForwardToDMZ, Show: true, Drop: false, MatchedRuleID: rule.ID, Reason: "rule_keep"}
 		}
 	}
 
-	return false, ""
+	return Decision{Store: true, Forward: false, Show: true, Drop: false, Reason: "default_store_no_forward"}
 }
 
-func isOPCUARead(evt *event.Event) bool {
-	if evt.SourceType != "opcua" || evt.Tags == nil {
-		return false
+func (e *Engine) dropDecision(reason, ruleID string, debugStoreDrop bool) Decision {
+	return Decision{
+		Store:         debugStoreDrop,
+		Forward:       false,
+		Show:          debugStoreDrop,
+		Drop:          !debugStoreDrop,
+		Sampled:       strings.Contains(reason, "sample"),
+		MatchedRuleID: ruleID,
+		Reason:        reason,
 	}
-	return strings.EqualFold(evt.Tags["opcua_event_type"], "CMD") &&
-		strings.EqualFold(evt.Tags["opcua_operation"], "READ")
+}
+
+func matchField(ruleValue, eventValue string) bool {
+	rv := strings.TrimSpace(strings.ToLower(ruleValue))
+	ev := strings.TrimSpace(strings.ToLower(eventValue))
+	return rv == "*" || rv == "" || rv == ev
 }
 
 func sampleToKeepEvery(sampleRate float64) int {
 	if sampleRate <= 0 {
-		return 0
+		return 10
 	}
 	if sampleRate >= 1 {
 		return 1
 	}
-	n := int(math.Round(1 / sampleRate))
-	if n < 1 {
-		return 1
-	}
-	return n
+	return int(1 / sampleRate)
 }
-
