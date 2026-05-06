@@ -73,6 +73,28 @@ This container runs with `network_mode: none` and is expected to be manually att
 
 This collector only observes, logs, and forwards events. It does not intercept or alter MES/OPC UA DMZ data flows.
 
+## OPC UA Command-Level Enrichment
+
+The normalizer includes OPC UA-specific enrichment for logs emitted by `powergrid_opcua_server`.
+
+- `[OPCUA]` + `[CMD]` logs are classified as `event_category=operator_action`.
+- OPC UA variants are handled: `[READ][CMD]`, `[WRITE][CMD]`, `[SESSION]`, `[SECURITY]`, `[ERROR]`, `[STARTUP]`, `[SHUTDOWN]`.
+- OPC UA command/session/security fields are extracted into `tags` when present:
+  - `opcua_operation`
+  - `opcua_event_type`
+  - `user`
+  - `node_id`
+  - `browse_name`
+  - `display_name`
+  - `mode`
+  - `value`
+- Sensitive control actions add `tags["sensitive_action"]="true"` when message content matches sensitive keywords (for example: `Reset`, `Emergency`, `Stop`, `Start`, `Vanne`, `Switch`, `DCY`).
+- MITRE ATT&CK ICS hint tags are added:
+  - command/control actions: `Impair Process Control` + `Manipulation of Control`
+  - unauthorized/rejected/security actions: `Initial Access / Defense Evasion` + `Unauthorized Access Attempt`
+
+This enrichment does not change the public event schema and does not alter existing non-OPCUA parsing behavior.
+
 ## Future V2 Direction
 
 - Dedicated DMZ collector service
@@ -80,4 +102,3 @@ This collector only observes, logs, and forwards events. It does not intercept o
 - IDS ingestion
 - OT firewall (`.254`) syslog ingestion
 - SIEM forwarding integrations
-

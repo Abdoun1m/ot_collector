@@ -16,6 +16,13 @@ func FromParsed(zone string, p syslog.ParsedMessage, sourceIP string) event.Even
 		src.AssetIP = sourceIP
 	}
 
+	tags := map[string]string{
+		"syslog_format": p.Format,
+		"hostname":      p.Hostname,
+		"app_name":      p.AppName,
+	}
+	enrichOPCUATags(p.Message, tags)
+
 	return event.Event{
 		ID:            newID(),
 		Timestamp:     p.Timestamp,
@@ -29,11 +36,7 @@ func FromParsed(zone string, p syslog.ParsedMessage, sourceIP string) event.Even
 		EventCategory: classifyCategory(p.Message),
 		Message:       p.Message,
 		Raw:           p.Raw,
-		Tags: map[string]string{
-			"syslog_format": p.Format,
-			"hostname":      p.Hostname,
-			"app_name":      p.AppName,
-		},
+		Tags:          tags,
 	}
 }
 
@@ -44,4 +47,3 @@ func newID() string {
 	}
 	return hex.EncodeToString(b)
 }
-
