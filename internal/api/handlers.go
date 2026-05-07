@@ -31,6 +31,15 @@ func (a *API) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *API) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		a.handlePostEvents(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
 	query := storage.EventQuery{
 		Limit:      parsePositiveInt(r.URL.Query().Get("limit"), 100),
 		SourceType: strings.TrimSpace(r.URL.Query().Get("source_type")),
@@ -45,6 +54,41 @@ func (a *API) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeJSON(w, http.StatusOK, events)
+}
+
+func (a *API) handlePostEvents(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		a.writeError(w, http.StatusBadRequest, "empty request body")
+		return
+	}
+
+	var batch []event.Event
+	if len(body) > 0 && body[0] == '[' {
+		if err := json.Unmarshal(body, &batch); err != nil {
+			a.writeError(w, http.StatusBadRequest, "invalid event array")
+			return
+		}
+	} else {
+		var evt event.Event
+		if err := json.Unmarshal(body, &evt); err != nil {
+			a.writeError(w, http.StatusBadRequest, "invalid event object")
+			return
+		}
+		batch = []event.Event{evt}
+	}
+
+	for _, evt := range batch {
+		normalizePostedEvent(&evt, a.zone)
+		a.processor.ProcessNormalized(evt)
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "accepted": len(batch)})
 }
 
 func (a *API) handleSources(w http.ResponseWriter, _ *http.Request) {
@@ -133,6 +177,19 @@ func (a *API) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (a *API) handleStorageRepair(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	report, err := a.store.Repair()
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, "storage repair failed")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, report)
 }
 
 func (a *API) handleFilterConfig(w http.ResponseWriter, r *http.Request) {
@@ -388,6 +445,37 @@ func parsePositiveInt(raw string, fallback int) int {
 		return fallback
 	}
 	return v
+}
+
+func normalizePostedEvent(evt *event.Event, zone string) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if evt.Timestamp == "" {
+		evt.Timestamp = now
+	}
+	if evt.ReceivedAt == "" {
+		evt.ReceivedAt = now
+	}
+	if evt.Zone == "" {
+		evt.Zone = zone
+	}
+	if evt.Protocol == "" {
+		evt.Protocol = "json"
+	}
+	if evt.SourceType == "" {
+		evt.SourceType = "unknown"
+	}
+	if evt.AssetName == "" {
+		evt.AssetName = "unknown"
+	}
+	if evt.Severity == "" {
+		evt.Severity = "info"
+	}
+	if evt.EventCategory == "" {
+		evt.EventCategory = "system"
+	}
+	if evt.Tags == nil {
+		evt.Tags = map[string]string{}
+	}
 }
 
 func sourcesKnownFromConfig(all []config.SourceConfig) map[string]sources.SourceInfo {

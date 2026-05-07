@@ -81,6 +81,7 @@ func (a *API) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/events", a.handleEvents)
 	mux.HandleFunc("/events/stream", a.handleEventStream)
+	mux.HandleFunc("/storage/repair", a.handleStorageRepair)
 	mux.HandleFunc("/sources", a.handleSources)
 	mux.HandleFunc("/stats", a.handleStats)
 	mux.HandleFunc("/stats/summary", a.handleStatsSummary)
