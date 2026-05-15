@@ -27,7 +27,7 @@ type IncomingLog struct {
 
 var (
 	rfc5424RE = regexp.MustCompile(`^<(\d{1,3})>(\d)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*)$`)
-	rfc3164RE = regexp.MustCompile(`^([A-Z][a-z]{2}\s+\d{1,2}\s+\d\d:\d\d:\d\d)\s+(\S+)\s+([^:]+):\s*(.*)$`)
+	rfc3164RE = regexp.MustCompile(`^(?:<(\d{1,3})>)?([A-Z][a-z]{2}\s+\d{1,2}\s+\d\d:\d\d:\d\d)\s+(\S+)\s+([^:]+):\s*(.*)$`)
 )
 
 func Parse(raw string) ParsedMessage {
@@ -62,13 +62,28 @@ func Parse(raw string) ParsedMessage {
 		}
 	}
 
-	if m := rfc3164RE.FindStringSubmatch(raw); len(m) == 5 {
+	if m := rfc3164RE.FindStringSubmatch(raw); len(m) == 6 {
+		var priority *int
+		var facility *int
+		var severity *int
+
+		if m[1] != "" {
+			p, _ := strconv.Atoi(m[1])
+			fac := p / 8
+			sev := p % 8
+			priority = &p
+			facility = &fac
+			severity = &sev
+		}
+
 		return ParsedMessage{
-			Priority:  nil,
-			Timestamp: parseRFC3164Timestamp(m[1]),
-			Hostname:  m[2],
-			AppName:   m[3],
-			Message:   m[4],
+			Priority:       priority,
+			Facility:       facility,
+			SeverityNumber: severity,
+			Timestamp:      parseRFC3164Timestamp(m[2]),
+			Hostname:       m[3],
+			AppName:        normalizeAppName(m[4]),
+			Message:        strings.TrimSpace(m[5]),
 			Raw:       raw,
 			Format:    "rfc3164",
 		}
@@ -104,4 +119,15 @@ func normalizeTime(ts string) string {
 		return t.UTC().Format(time.RFC3339Nano)
 	}
 	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func normalizeAppName(app string) string {
+	app = strings.TrimSpace(app)
+	if app == "" {
+		return app
+	}
+	if idx := strings.Index(app, "["); idx > 0 {
+		return app[:idx]
+	}
+	return app
 }

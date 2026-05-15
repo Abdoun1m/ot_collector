@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Abdoun1m/ot_collector/internal/syslog"
+	"github.com/Abdoun1m/ot_collector/internal/sources"
 )
 
 func TestOPCUAReadCommandEnrichment(t *testing.T) {
@@ -507,6 +508,221 @@ func TestStructuredTelemetryFallbacks(t *testing.T) {
 				t.Fatalf("expected legacy path, got structured_json tag %q", evt.Tags["structured_json"])
 			}
 		})
+	}
+}
+
+func TestOPNsenseFilterlogNormalization(t *testing.T) {
+	tests := []struct {
+		name                 string
+		raw                  string
+		format               string
+		hostname             string
+		appName              string
+		sourceIP             string
+		wantSourceType       string
+		wantEventCategory    string
+		wantSeverity         string
+		wantMessage          string
+		wantContainsTags     map[string]string
+		wantAbsentTags       []string
+		wantSyslogFormatPart string
+	}{
+		{
+			name:   "bsd_udp_pass_dns",
+			raw:    `<134>Jul 16 06:36:52 firewall.local filterlog[40156]: 85,,,9f96d956119c2514,bridge0,match,pass,out,4,0x0,,64,63281,0,DF,17,udp,52,10.0.0.5,8.8.8.8,36444,53,32`,
+			format: "rfc3164",
+			hostname: "firewall.local",
+			appName: "filterlog",
+			wantSourceType: "firewall",
+			wantEventCategory: "network",
+			wantSeverity: "info",
+			wantMessage: "firewall_pass",
+			wantContainsTags: map[string]string{
+				"rule_number": "85",
+				"tracker": "9f96d956119c2514",
+				"interface": "bridge0",
+				"action": "pass",
+				"direction": "out",
+				"ip_version": "4",
+				"protocol_name": "udp",
+				"src_ip": "10.0.0.5",
+				"dst_ip": "8.8.8.8",
+				"src_port": "36444",
+				"dst_port": "53",
+				"data_length": "32",
+				"firewall_vendor": "opnsense",
+			},
+		},
+		{
+			name:   "bsd_tcp_block_syn",
+			raw:    `<134>Jul 16 06:36:52 firewall.local filterlog[40156]: 101,,,1000000103,igb1,match,block,in,4,0x0,,63,26567,0,DF,6,tcp,60,192.168.1.100,10.0.0.10,40234,443,0,S,3917296601,,64240,,mss`,
+			format: "rfc3164",
+			hostname: "firewall.local",
+			appName: "filterlog",
+			wantSourceType: "firewall",
+			wantEventCategory: "security",
+			wantSeverity: "warn",
+			wantMessage: "firewall_block",
+			wantContainsTags: map[string]string{
+				"rule_number": "101",
+				"action": "block",
+				"direction": "in",
+				"protocol_name": "tcp",
+				"src_ip": "192.168.1.100",
+				"dst_ip": "10.0.0.10",
+				"src_port": "40234",
+				"dst_port": "443",
+				"tcp_flags": "S",
+				"tcp_sequence": "3917296601",
+				"tcp_window": "64240",
+				"tcp_options": "mss",
+				"protocol_hint": "https",
+				"high_value_firewall_event": "true",
+				"mitre_ics_tactic": "Initial Access",
+			},
+		},
+		{
+			name:   "rfc5424_structured_data_block",
+			raw:    `<134>1 2024-08-05T12:05:54+00:00 firewall.local filterlog 54802 - [meta sequenceId="2763892"] 101,,,1000000103,igb1,match,block,in,4,0x0,,63,26567,0,DF,6,tcp,60,192.168.1.100,10.0.0.10,40234,443,0,S,3917296601,,64240,,mss`,
+			format: "rfc5424",
+			hostname: "firewall.local",
+			appName: "filterlog",
+			wantSourceType: "firewall",
+			wantEventCategory: "security",
+			wantSeverity: "warn",
+			wantMessage: "firewall_block",
+			wantContainsTags: map[string]string{
+				"rule_number": "101",
+				"action": "block",
+				"direction": "in",
+				"dst_port": "443",
+				"protocol_hint": "https",
+				"high_value_firewall_event": "true",
+			},
+			wantSyslogFormatPart: "rfc5424",
+		},
+		{
+			name:   "ipv4_opcua_block",
+			raw:    `<134>Jul 16 06:36:52 firewall.local filterlog[40156]: 202,,,deadbeef,igb1,match,block,in,4,0x0,,64,1234,0,DF,6,tcp,60,10.20.0.5,192.168.1.62,54321,4840,0,S,111111111,,65535,,mss`,
+			format: "rfc3164",
+			hostname: "firewall.local",
+			appName: "filterlog",
+			wantSourceType: "firewall",
+			wantEventCategory: "security",
+			wantSeverity: "warn",
+			wantMessage: "firewall_block",
+			wantContainsTags: map[string]string{
+				"dst_port": "4840",
+				"protocol_hint": "opcua",
+				"high_value_firewall_event": "true",
+				"mitre_ics_tactic": "Initial Access",
+			},
+		},
+		{
+			name:   "ipv6_udp_pass",
+			raw:    `<134>Jul 16 06:36:52 firewall.local filterlog[40156]: 85,,,abcdef1234,em0,match,pass,out,6,0x00,0x00000,64,udp,17,52,2001:db8::1,2001:db8::2,5353,5353,32`,
+			format: "rfc3164",
+			hostname: "firewall.local",
+			appName: "filterlog",
+			wantSourceType: "firewall",
+			wantEventCategory: "network",
+			wantSeverity: "info",
+			wantMessage: "firewall_pass",
+			wantContainsTags: map[string]string{
+				"ip_version": "6",
+				"protocol_name": "udp",
+				"src_ip": "2001:db8::1",
+				"dst_ip": "2001:db8::2",
+				"src_port": "5353",
+				"dst_port": "5353",
+			},
+		},
+		{
+			name:   "short_filterlog_csv",
+			raw:    `<134>Jul 16 06:36:52 firewall.local filterlog[40156]: 85,,,tracker,bridge0,match,block`,
+			format: "rfc3164",
+			hostname: "firewall.local",
+			appName: "filterlog",
+			wantSourceType: "firewall",
+			wantEventCategory: "error",
+			wantSeverity: "error",
+			wantMessage: "firewall_event",
+			wantContainsTags: map[string]string{
+				"parse_warning": "short filterlog csv",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed := syslog.ParsedMessage{
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Hostname:  tc.hostname,
+				AppName:   tc.appName,
+				Message:   tc.raw,
+				Raw:       tc.raw,
+				Format:    tc.format,
+			}
+
+			evt := FromParsed("OT", parsed, tc.sourceIP)
+			if evt.SourceType != tc.wantSourceType {
+				t.Fatalf("expected source_type=%s, got %s", tc.wantSourceType, evt.SourceType)
+			}
+			if evt.EventCategory != tc.wantEventCategory {
+				t.Fatalf("expected event_category=%s, got %s", tc.wantEventCategory, evt.EventCategory)
+			}
+			if evt.Severity != tc.wantSeverity {
+				t.Fatalf("expected severity=%s, got %s", tc.wantSeverity, evt.Severity)
+			}
+			if evt.Message != tc.wantMessage {
+				t.Fatalf("expected message=%s, got %s", tc.wantMessage, evt.Message)
+			}
+			for key, want := range tc.wantContainsTags {
+				if got := evt.Tags[key]; got != want {
+					t.Fatalf("expected tag %s=%q, got %q", key, want, got)
+				}
+			}
+			for _, key := range tc.wantAbsentTags {
+				if _, ok := evt.Tags[key]; ok {
+					t.Fatalf("expected tag %s to be absent", key)
+				}
+			}
+			if tc.wantSyslogFormatPart != "" && !strings.Contains(evt.Tags["syslog_format"], tc.wantSyslogFormatPart) {
+				t.Fatalf("expected syslog_format to contain %q, got %q", tc.wantSyslogFormatPart, evt.Tags["syslog_format"])
+			}
+			if tc.name == "rfc5424_structured_data_block" {
+				for key, value := range evt.Tags {
+					if strings.Contains(value, "[meta") || strings.Contains(value, "sequenceId") {
+						t.Fatalf("unexpected structured-data artifact in tag %s=%q", key, value)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyRoutingAndHelperGuards(t *testing.T) {
+	raw := `[OPCUA] [SYNC][CMD] NodeId=ns=2;i=1159 BrowseName=DCY Value=1`
+	parsed := syslog.ParsedMessage{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Hostname:  "powergrid-opcua",
+		AppName:   "powergrid_opcua_server",
+		Message:   raw,
+		Raw:       raw,
+		Format:    "raw",
+	}
+	if payload := extractStructuredTelemetryJSON(raw); payload != nil {
+		t.Fatalf("expected nil structured payload, got %#v", payload)
+	}
+	if evt, ok := parseOPNsenseFilterlog("OT", parsed, "192.168.1.62", sources.Resolve("192.168.1.62", parsed.Hostname, parsed.AppName, parsed.Message)); ok {
+		t.Fatalf("expected filterlog parser to reject legacy OPC UA text, got %#v", evt)
+	}
+	evt := FromParsed("OT", parsed, "192.168.1.62")
+	if evt.Tags["browse_name"] != "DCY" {
+		t.Fatalf("expected browse_name=DCY, got %q", evt.Tags["browse_name"])
+	}
+	if evt.Tags["sensitive_action"] != "true" {
+		t.Fatalf("expected sensitive_action=true, got %q", evt.Tags["sensitive_action"])
 	}
 }
 
