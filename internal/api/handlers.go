@@ -363,27 +363,62 @@ func (a *API) handleForwardingTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := a.processor.ForwardingConfig()
-	if !cfg.Enabled || strings.TrimSpace(cfg.DMZCollectorURL) == "" {
-		a.writeError(w, http.StatusBadRequest, "forwarding disabled or URL missing")
+	dmzURL := strings.TrimSpace(cfg.DMZCollectorURL)
+	if dmzURL == "" {
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"success": false,
+			"error":   "forwarding URL not configured",
+		})
 		return
 	}
-	testPayload := map[string]any{
-		"kind":      "forwarding_test",
-		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"service":   "ot_collector",
+	now := time.Now().UTC()
+	testEvt := event.Event{
+		ID:            fmt.Sprintf("fwdtest-%d", now.UnixNano()),
+		Timestamp:     now.Format(time.RFC3339Nano),
+		ReceivedAt:    now.Format(time.RFC3339Nano),
+		Zone:          a.zone,
+		SourceType:    "ot_collector",
+		AssetName:     "ot_collector",
+		Severity:      "info",
+		Protocol:      "json",
+		EventCategory: "system",
+		Message:       "forwarding connectivity test",
+		Tags:          map[string]string{"kind": "forwarding_test"},
 	}
-	body, _ := json.Marshal(testPayload)
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	body, _ := json.Marshal(testEvt)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.DMZCollectorURL, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dmzURL, bytes.NewReader(body))
 	if err != nil {
-		a.writeError(w, http.StatusBadGateway, "forwarding test failed")
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	start := time.Now()
+	testClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := testClient.Do(req)
+	elapsedMS := time.Since(start).Milliseconds()
+	if err != nil {
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"success":    false,
+			"elapsed_ms": elapsedMS,
+			"error":      err.Error(),
+		})
 		return
 	}
 	defer resp.Body.Close()
-	a.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "status_code": resp.StatusCode})
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"success":       success,
+		"status_code":   resp.StatusCode,
+		"elapsed_ms":    elapsedMS,
+		"response_body": strings.TrimSpace(string(respBytes)),
+		"error":         "",
+	})
 }
 
 func (a *API) handleTestEvent(w http.ResponseWriter, r *http.Request) {

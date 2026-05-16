@@ -275,14 +275,15 @@ func topN(m map[string]int64, n int) []map[string]any {
 }
 
 type Processor struct {
-	zone          string
-	store         *storage.JSONLStore
-	forwarder     *forwarder.Forwarder
-	stats         *Stats
-	filterEngine  *filter.Engine
-	streamHub     *api.StreamHub
-	forwardingCfg *config.ForwardingStore
-	logger        *slog.Logger
+	zone            string
+	store           *storage.JSONLStore
+	forwarder       *forwarder.Forwarder
+	stats           *Stats
+	filterEngine    *filter.Engine
+	streamHub       *api.StreamHub
+	forwardingCfg   *config.ForwardingStore
+	logger          *slog.Logger
+	forwardTimeout  int
 }
 
 func (p *Processor) ProcessRaw(raw, sourceIP, _ string) {
@@ -306,7 +307,20 @@ func (p *Processor) ProcessRaw(raw, sourceIP, _ string) {
 }
 
 func (p *Processor) ProcessNormalized(evt event.Event) {
-	p.ProcessNormalizedWithDecision(evt, filter.Decision{Store: true, Forward: false, Show: true})
+	if evt.Tags == nil {
+		evt.Tags = map[string]string{}
+	}
+	decision := p.filterEngine.Evaluate(&evt)
+	evt.Tags["collector_decision"] = decisionTag(decision)
+	if decision.MatchedRuleID != "" {
+		evt.Tags["matched_rule_id"] = decision.MatchedRuleID
+	}
+	if decision.Drop {
+		p.stats.AddDropped(decision.MatchedRuleID, decision.Reason, decision.Sampled)
+		return
+	}
+	p.stats.AddDecision(decisionTag(decision), decision.MatchedRuleID, decision.Sampled)
+	p.ProcessNormalizedWithDecision(evt, decision)
 }
 
 func (p *Processor) ProcessNormalizedWithDecision(evt event.Event, decision filter.Decision) {
@@ -340,17 +354,18 @@ func (p *Processor) ProcessNormalizedWithDecision(evt event.Event, decision filt
 	fcfg := p.forwardingCfg.Get()
 	shouldForward := decision.Forward || (fcfg.Enabled && !fcfg.ForwardOnlyFiltered)
 	if shouldForward && p.forwarder.Enabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := p.forwarder.Send(ctx, evt); err != nil {
-			p.logger.Warn("dmz forwarding failed", "error", err)
-			p.stats.AddForwardResult(false, "")
-			_ = p.forwardingCfg.UpdateForwardResult(false, "")
-		} else {
-			now := time.Now().UTC().Format(time.RFC3339Nano)
-			p.stats.AddForwardResult(true, now)
-			_ = p.forwardingCfg.UpdateForwardResult(true, now)
-		}
+		go func(evt event.Event) {
+			if err := p.forwarder.Send(context.Background(), evt); err != nil {
+				p.logger.Warn("dmz forwarding failed", "error", err, "event_id", evt.ID)
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				p.stats.AddForwardResult(false, "")
+				_ = p.forwardingCfg.UpdateForwardResult(false, now, err.Error())
+			} else {
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				p.stats.AddForwardResult(true, now)
+				_ = p.forwardingCfg.UpdateForwardResult(true, now, "")
+			}
+		}(evt)
 	}
 }
 
@@ -401,7 +416,7 @@ func (p *Processor) UpdateForwardingConfig(cfg config.ForwardingConfig) error {
 	if err := p.forwardingCfg.Replace(cfg); err != nil {
 		return err
 	}
-	p.forwarder = forwarder.New(cfg.DMZCollectorURL, p.logger)
+	p.forwarder = forwarder.New(cfg.DMZCollectorURL, p.logger, p.forwardTimeout)
 	return nil
 }
 
@@ -439,20 +454,21 @@ func main() {
 	if fcfg.DMZCollectorURL != "" {
 		dmzURL = fcfg.DMZCollectorURL
 	}
-	fwd := forwarder.New(dmzURL, logger)
+	fwd := forwarder.New(dmzURL, logger, cfg.ForwardTimeoutSeconds)
 	streamHub := api.NewStreamHub()
 	filterEngine := filter.New()
 	filterEngine.SetRules(ruleStore.All())
 
 	processor := &Processor{
-		zone:          cfg.Zone,
-		store:         store,
-		forwarder:     fwd,
-		stats:         stats,
-		filterEngine:  filterEngine,
-		streamHub:     streamHub,
-		forwardingCfg: forwardingStore,
-		logger:        logger,
+		zone:           cfg.Zone,
+		store:          store,
+		forwarder:      fwd,
+		stats:          stats,
+		filterEngine:   filterEngine,
+		streamHub:      streamHub,
+		forwardingCfg:  forwardingStore,
+		logger:         logger,
+		forwardTimeout: cfg.ForwardTimeoutSeconds,
 	}
 
 	incoming := make(chan syslog.IncomingLog, 2048)
