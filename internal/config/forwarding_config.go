@@ -14,7 +14,10 @@ type ForwardingConfig struct {
 	ForwardOnlyFiltered     bool   `json:"forward_only_filtered_events"`
 	ForwardQueueStatus      string `json:"forward_queue_status"`
 	FailedForwardCount      int64  `json:"failed_forward_count"`
+	SuccessfulForwardCount  int64  `json:"successful_forward_count"`
 	LastSuccessfulForwardAt string `json:"last_successful_forward_time"`
+	LastFailedForwardAt     string `json:"last_failed_forward_time"`
+	LastError               string `json:"last_error"`
 }
 
 type ForwardingStore struct {
@@ -47,13 +50,19 @@ func (s *ForwardingStore) Replace(cfg ForwardingConfig) error {
 	return s.persistLocked()
 }
 
-func (s *ForwardingStore) UpdateForwardResult(success bool, when string) error {
+func (s *ForwardingStore) UpdateForwardResult(success bool, when string, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if success {
 		s.data.LastSuccessfulForwardAt = when
+		s.data.SuccessfulForwardCount++
+		s.data.LastError = ""
 	} else {
 		s.data.FailedForwardCount++
+		s.data.LastFailedForwardAt = when
+		if errMsg != "" {
+			s.data.LastError = errMsg
+		}
 	}
 	return s.persistLocked()
 }
