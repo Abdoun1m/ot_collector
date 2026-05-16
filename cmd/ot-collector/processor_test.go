@@ -176,7 +176,52 @@ func TestProcessNormalized_GDSAgent_StoreAndForward(t *testing.T) {
 	}
 }
 
-// ── Test B: POST /test-event path — gds-agent (hyphen) normalised and forwarded ──
+// ── Test B: POST /test-event path — flat JSON with gds-agent (hyphen) preserved and forwarded ──
+// This is the exact scenario that was broken: a flat event JSON was treated as
+// a raw syslog string, causing the supplied ID to never reach OT or DMZ.
+
+func TestProcessTestEvent_FlatJSON_GDSHyphen(t *testing.T) {
+	dmz := newMockDMZ()
+	defer dmz.srv.Close()
+	proc, store := newTestProcessor(t, dmz)
+
+	evtID := fmt.Sprintf("test-event-flat-%d", time.Now().UnixNano())
+	// ProcessTestEvent is what handleTestEvent calls after parsing flat JSON.
+	proc.ProcessTestEvent(event.Event{
+		ID:         evtID,
+		SourceType: "gds-agent", // hyphen — must be normalised to gds_agent
+		AssetIP:    "192.168.1.30",
+	})
+
+	// OT storage
+	stored, ok := readEventByID(t, store, evtID)
+	if !ok {
+		t.Fatalf("/test-event: id %s not found in OT storage", evtID)
+	}
+	if stored.ID != evtID {
+		t.Errorf("OT id: want %s, got %s", evtID, stored.ID)
+	}
+	if stored.SourceType != "gds_agent" {
+		t.Errorf("OT source_type: want gds_agent, got %s", stored.SourceType)
+	}
+	if got := stored.Tags["splunk_sourcetype"]; got != "labshock:ot:gds" {
+		t.Errorf("splunk_sourcetype: want labshock:ot:gds, got %q", got)
+	}
+	if got := stored.Tags["ingestion_path"]; got != "api_test_event" {
+		t.Errorf("ingestion_path: want api_test_event, got %q", got)
+	}
+
+	// DMZ
+	dmzEvt, ok := dmz.waitForID(evtID, 3*time.Second)
+	if !ok {
+		t.Fatalf("/test-event: id %s not received in DMZ", evtID)
+	}
+	if dmzEvt.SourceType != "gds_agent" {
+		t.Errorf("DMZ source_type: want gds_agent, got %s", dmzEvt.SourceType)
+	}
+}
+
+// ── (original Test B kept for regression) ──
 
 func TestProcessNormalized_GDSHyphen_NormalisedAndForwarded(t *testing.T) {
 	dmz := newMockDMZ()

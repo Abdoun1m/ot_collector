@@ -405,11 +405,17 @@ func (p *Processor) ProcessRaw(raw, sourceIP, transport string) {
 	p.ingest(evt, "syslog_"+transport)
 }
 
-// ProcessNormalized is the API ingestion entry point (POST /events, /test-event,
-// forwarding pipeline tests). Rate-limiting and deduplication are skipped so
-// deliberate API calls are never silently dropped by flood controls.
+// ProcessNormalized is the API ingestion entry point (POST /events and
+// forwarding pipeline tests). Rate-limiting and deduplication are skipped.
 func (p *Processor) ProcessNormalized(evt event.Event) {
 	p.ingest(evt, "api")
+}
+
+// ProcessTestEvent routes POST /test-event events through the same ingest
+// pipeline with a distinct ingestion_path so they are identifiable in logs
+// and tags. Rate-limiting and deduplication are skipped.
+func (p *Processor) ProcessTestEvent(evt event.Event) {
+	p.ingest(evt, "api_test_event")
 }
 
 // ingest is the single shared processing function used by all ingestion paths.

@@ -27,6 +27,7 @@ type StatsProvider interface {
 type Processor interface {
 	ProcessRaw(raw, sourceIP, transport string)
 	ProcessNormalized(evt event.Event)
+	ProcessTestEvent(evt event.Event)
 	CurrentFilterConfig() map[string]any
 	UpdateFilterConfig(cfg map[string]any) map[string]any
 	CurrentRules() []config.RuleConfig

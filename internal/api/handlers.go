@@ -475,32 +475,53 @@ func (a *API) handleTestEvent(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	var payload struct {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		a.writeError(w, http.StatusBadRequest, "empty request body")
+		return
+	}
+
+	// Attempt 1: wrapped format {"event":{...},"source_ip":"..."}
+	var wrapped struct {
 		Raw      string       `json:"raw"`
 		SourceIP string       `json:"source_ip"`
 		Event    *event.Event `json:"event"`
 	}
-	_ = json.Unmarshal(body, &payload)
-	if payload.Event != nil {
-		// Preserve all caller-supplied fields; only fill in blanks.
-		evt := *payload.Event
-		if evt.ID == "" {
-			evt.ID = event.NewID()
-		}
-		if evt.Zone == "" {
-			evt.Zone = a.zone
-		}
-		if evt.Protocol == "" {
-			evt.Protocol = "json"
-		}
-		if evt.Tags == nil {
-			evt.Tags = map[string]string{}
-		}
-		a.processor.ProcessNormalized(evt)
-		a.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "id": evt.ID})
+	_ = json.Unmarshal(body, &wrapped)
+
+	if wrapped.Event != nil {
+		evt := *wrapped.Event
+		fillTestEventDefaults(&evt, a.zone)
+		a.processor.ProcessTestEvent(evt)
+		a.writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":         "accepted",
+			"id":             evt.ID,
+			"source_type":    evt.SourceType,
+			"ingestion_path": "api_test_event",
+		})
 		return
 	}
-	raw := strings.TrimSpace(payload.Raw)
+
+	// Attempt 2: flat event JSON {"id":"...","source_type":"...","message":"..."}
+	// Users commonly POST a direct Event object without wrapping it in {"event":...}.
+	if len(body) > 0 && body[0] == '{' {
+		var flatEvt event.Event
+		if jsonErr := json.Unmarshal(body, &flatEvt); jsonErr == nil &&
+			(flatEvt.ID != "" || flatEvt.SourceType != "" || flatEvt.Message != "") {
+			fillTestEventDefaults(&flatEvt, a.zone)
+			a.processor.ProcessTestEvent(flatEvt)
+			a.writeJSON(w, http.StatusAccepted, map[string]any{
+				"status":         "accepted",
+				"id":             flatEvt.ID,
+				"source_type":    flatEvt.SourceType,
+				"ingestion_path": "api_test_event",
+			})
+			return
+		}
+	}
+
+	// Attempt 3: raw syslog string (legacy path)
+	raw := strings.TrimSpace(wrapped.Raw)
 	if raw == "" {
 		raw = strings.TrimSpace(string(body))
 	}
@@ -508,12 +529,29 @@ func (a *API) handleTestEvent(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, "provide raw or event")
 		return
 	}
-	src := strings.TrimSpace(payload.SourceIP)
+	src := strings.TrimSpace(wrapped.SourceIP)
 	if src == "" {
 		src = "127.0.0.1"
 	}
 	a.processor.ProcessRaw(raw, src, "api")
 	a.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+// fillTestEventDefaults fills in structural blanks on a test event.
+// Caller-supplied fields (id, source_type, message, etc.) are preserved exactly.
+func fillTestEventDefaults(evt *event.Event, zone string) {
+	if evt.ID == "" {
+		evt.ID = event.NewID()
+	}
+	if evt.Zone == "" {
+		evt.Zone = zone
+	}
+	if evt.Protocol == "" {
+		evt.Protocol = "json"
+	}
+	if evt.Tags == nil {
+		evt.Tags = map[string]string{}
+	}
 }
 
 func (a *API) writeJSON(w http.ResponseWriter, status int, v any) {
