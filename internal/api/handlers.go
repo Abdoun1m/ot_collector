@@ -84,11 +84,13 @@ func (a *API) handlePostEvents(w http.ResponseWriter, r *http.Request) {
 		batch = []event.Event{evt}
 	}
 
+	ids := make([]string, 0, len(batch))
 	for _, evt := range batch {
 		normalizePostedEvent(&evt, a.zone)
+		ids = append(ids, evt.ID)
 		a.processor.ProcessNormalized(evt)
 	}
-	a.writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "accepted": len(batch)})
+	a.writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "accepted": len(batch), "ids": ids})
 }
 
 func (a *API) handleSources(w http.ResponseWriter, _ *http.Request) {
@@ -421,6 +423,36 @@ func (a *API) handleForwardingTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleForwardingTestPipeline injects a real test event through the full shared
+// ingest pipeline (rule evaluation, storage, async DMZ forwarding) and returns
+// the event ID so the caller can poll /events to verify end-to-end delivery.
+func (a *API) handleForwardingTestPipeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	now := time.Now().UTC()
+	testEvt := event.Event{
+		ID:            fmt.Sprintf("fwdpipeline-%d", now.UnixNano()),
+		Timestamp:     now.Format(time.RFC3339Nano),
+		ReceivedAt:    now.Format(time.RFC3339Nano),
+		Zone:          a.zone,
+		SourceType:    "ot_collector",
+		AssetName:     "ot_collector",
+		Severity:      "info",
+		Protocol:      "json",
+		EventCategory: "system",
+		Message:       "forwarding pipeline test",
+		Tags:          map[string]string{"kind": "forwarding_pipeline_test"},
+	}
+	a.processor.ProcessNormalized(testEvt)
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "injected",
+		"event_id": testEvt.ID,
+		"note":     "event passed through ingest pipeline; DMZ forwarding is async — poll /events?search=" + testEvt.ID,
+	})
+}
+
 func (a *API) handleTestEvent(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
@@ -435,14 +467,22 @@ func (a *API) handleTestEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &payload)
 	if payload.Event != nil {
-		if payload.Event.Zone == "" {
-			payload.Event.Zone = a.zone
+		// Preserve all caller-supplied fields; only fill in blanks.
+		evt := *payload.Event
+		if evt.ID == "" {
+			evt.ID = event.NewID()
 		}
-		if payload.Event.Protocol == "" {
-			payload.Event.Protocol = "syslog"
+		if evt.Zone == "" {
+			evt.Zone = a.zone
 		}
-		a.processor.ProcessNormalized(*payload.Event)
-		a.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+		if evt.Protocol == "" {
+			evt.Protocol = "json"
+		}
+		if evt.Tags == nil {
+			evt.Tags = map[string]string{}
+		}
+		a.processor.ProcessNormalized(evt)
+		a.writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "id": evt.ID})
 		return
 	}
 	raw := strings.TrimSpace(payload.Raw)
@@ -484,6 +524,9 @@ func parsePositiveInt(raw string, fallback int) int {
 
 func normalizePostedEvent(evt *event.Event, zone string) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if evt.ID == "" {
+		evt.ID = event.NewID()
+	}
 	if evt.Timestamp == "" {
 		evt.Timestamp = now
 	}

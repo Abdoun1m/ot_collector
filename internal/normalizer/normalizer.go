@@ -2,8 +2,6 @@ package normalizer
 
 import (
 	"encoding/csv"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -38,7 +36,7 @@ func FromParsed(zone string, p syslog.ParsedMessage, sourceIP string) event.Even
 	enrichOPCUATags(p.Message, tags)
 
 	return event.Event{
-		ID:            newID(),
+		ID:            event.NewID(),
 		Timestamp:     p.Timestamp,
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 		Zone:          zone,
@@ -190,7 +188,7 @@ func fromStructuredTelemetryJSON(sourceIP, zone string, p syslog.ParsedMessage, 
 	copySafeJSONFieldsToTags(tags, payload)
 
 	return event.Event{
-		ID:            newID(),
+		ID:            event.NewID(),
 		Timestamp:     timestamp,
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 		Zone:          eventZone,
@@ -307,7 +305,7 @@ func inferSourceTypeFromComponent(component string) string {
 	case strings.Contains(lower, "opcua"):
 		return "opcua"
 	case strings.Contains(lower, "gds_agent"), strings.Contains(lower, "gds-agent"):
-		return "gds-agent"
+		return "gds_agent"
 	case strings.Contains(lower, "gds"):
 		return "gds"
 	case strings.Contains(lower, "fuxa"), strings.Contains(lower, "scada"):
@@ -453,7 +451,7 @@ func parseOPNsenseFilterlog(zone string, p syslog.ParsedMessage, sourceIP string
 	}
 
 	evt := event.Event{
-		ID:         newID(),
+		ID:         event.NewID(),
 		Timestamp:  p.Timestamp,
 		ReceivedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		Zone:       zone,
@@ -812,10 +810,3 @@ func scalarToString(v interface{}) (string, bool) {
 	}
 }
 
-func newID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return time.Now().UTC().Format("20060102150405.000000000")
-	}
-	return hex.EncodeToString(b)
-}

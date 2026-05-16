@@ -81,6 +81,8 @@ func (e *Engine) Rules() []config.RuleConfig {
 	return out
 }
 
+// Evaluate applies rate limiting, deduplication, and rule matching.
+// Use for syslog ingestion paths.
 func (e *Engine) Evaluate(evt *event.Event) Decision {
 	if evt == nil {
 		return Decision{Store: true, Show: true, Drop: false, Reason: "nil_event_default"}
@@ -124,6 +126,30 @@ func (e *Engine) Evaluate(evt *event.Event) Decision {
 		e.dedupCache[dupKey] = dupState{lastSeen: now}
 	}
 
+	return e.applyRules(evt, rules, debugStoreDrop)
+}
+
+// EvaluateRulesOnly applies only rule matching, skipping rate limiting and deduplication.
+// Use for API-injected events (POST /events, /test-event, forwarding tests) so deliberate
+// calls are never silently dropped by flood controls.
+func (e *Engine) EvaluateRulesOnly(evt *event.Event) Decision {
+	if evt == nil {
+		return Decision{Store: true, Show: true, Drop: false, Reason: "nil_event_default"}
+	}
+	e.mu.RLock()
+	rules := make([]config.RuleConfig, len(e.rules))
+	copy(rules, e.rules)
+	debugStoreDrop := e.debugStoreDrop
+	e.mu.RUnlock()
+
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+
+	return e.applyRules(evt, rules, debugStoreDrop)
+}
+
+// applyRules must be called with e.stateMu held (sample counter is updated inside).
+func (e *Engine) applyRules(evt *event.Event, rules []config.RuleConfig, debugStoreDrop bool) Decision {
 	operation := strings.ToUpper(evt.Tags["opcua_operation"])
 	for _, rule := range rules {
 		if !rule.Enabled {
@@ -152,6 +178,8 @@ func (e *Engine) Evaluate(evt *event.Event) Decision {
 			return Decision{Store: false, Forward: true, Show: true, Drop: false, MatchedRuleID: rule.ID, Reason: "rule_forward_only"}
 		case "store_only":
 			return Decision{Store: true, Forward: false, Show: true, Drop: false, MatchedRuleID: rule.ID, Reason: "rule_store_only"}
+		case "store_and_forward":
+			return Decision{Store: true, Forward: true, Show: true, Drop: false, MatchedRuleID: rule.ID, Reason: "rule_store_and_forward"}
 		case "sample":
 			rate := rule.SampleRate
 			if rate <= 0 {

@@ -275,57 +275,130 @@ func topN(m map[string]int64, n int) []map[string]any {
 }
 
 type Processor struct {
-	zone            string
-	store           *storage.JSONLStore
-	forwarder       *forwarder.Forwarder
-	stats           *Stats
-	filterEngine    *filter.Engine
-	streamHub       *api.StreamHub
-	forwardingCfg   *config.ForwardingStore
-	logger          *slog.Logger
-	forwardTimeout  int
+	zone           string
+	store          *storage.JSONLStore
+	forwarder      *forwarder.Forwarder
+	stats          *Stats
+	filterEngine   *filter.Engine
+	streamHub      *api.StreamHub
+	forwardingCfg  *config.ForwardingStore
+	logger         *slog.Logger
+	forwardTimeout int
 }
 
-func (p *Processor) ProcessRaw(raw, sourceIP, _ string) {
+// normalizeSourceType canonicalises source_type before rule matching so that
+// hyphenated variants (gds-agent) and aliases (opnsense) match rule entries.
+func normalizeSourceType(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "-", "_")
+	switch s {
+	case "opnsense":
+		return "firewall"
+	case "fuxa":
+		return "scada"
+	case "openplc":
+		return "plc"
+	case "nozomi":
+		return "ids"
+	}
+	return s
+}
+
+func siemIndexHint(sourceType string) string {
+	switch sourceType {
+	case "firewall":
+		return "ot-firewall"
+	case "opcua":
+		return "ot-opcua"
+	case "gds_agent":
+		return "ot-gds-agent"
+	case "scada":
+		return "ot-scada"
+	case "plc":
+		return "ot-plc"
+	case "ids":
+		return "ot-ids"
+	case "ews":
+		return "ot-ews"
+	case "vault":
+		return "ot-vault"
+	default:
+		return "ot-generic"
+	}
+}
+
+func splunkSourcetype(sourceType string) string {
+	switch sourceType {
+	case "firewall":
+		return "ot:firewall"
+	case "opcua":
+		return "ot:opcua"
+	case "gds_agent":
+		return "ot:gds_agent"
+	case "scada":
+		return "ot:scada"
+	case "plc":
+		return "ot:plc"
+	case "ids":
+		return "ot:ids"
+	case "ews":
+		return "ot:ews"
+	case "vault":
+		return "ot:vault"
+	default:
+		return "ot:generic"
+	}
+}
+
+// decisionLabel returns a human-readable label that reflects what will actually
+// happen (willForward is the resolved forwarding intent after config check).
+func decisionLabel(d filter.Decision, willForward bool) string {
+	if d.Drop {
+		return "drop"
+	}
+	if d.Store && willForward {
+		return "store_and_forward"
+	}
+	if !d.Store && willForward {
+		return "forward_only"
+	}
+	if d.Store {
+		if d.Sampled {
+			return "sample"
+		}
+		return "store_only"
+	}
+	return "store_only"
+}
+
+// ProcessRaw is the syslog ingestion entry point (UDP/TCP).
+// It parses the raw syslog line, normalises it, then runs the full ingest pipeline
+// with rate-limiting and deduplication enabled.
+func (p *Processor) ProcessRaw(raw, sourceIP, transport string) {
 	parsed := syslog.Parse(raw)
 	evt := normalizer.FromParsed(p.zone, parsed, sourceIP)
-	if evt.Tags == nil {
-		evt.Tags = map[string]string{}
-	}
-	decision := p.filterEngine.Evaluate(&evt)
-	evt.Tags["collector_decision"] = decisionTag(decision)
-	if decision.MatchedRuleID != "" {
-		evt.Tags["matched_rule_id"] = decision.MatchedRuleID
-	}
-	if decision.Drop {
-		p.stats.AddDropped(decision.MatchedRuleID, decision.Reason, decision.Sampled)
-		p.logger.Debug("dropped event by decision", "reason", decision.Reason, "rule_id", decision.MatchedRuleID)
-		return
-	}
-	p.stats.AddDecision(decisionTag(decision), decision.MatchedRuleID, decision.Sampled)
-	p.ProcessNormalizedWithDecision(evt, decision)
+	p.ingest(evt, "syslog_"+transport)
 }
 
+// ProcessNormalized is the API ingestion entry point (POST /events, /test-event,
+// forwarding pipeline tests). Rate-limiting and deduplication are skipped so
+// deliberate API calls are never silently dropped by flood controls.
 func (p *Processor) ProcessNormalized(evt event.Event) {
-	if evt.Tags == nil {
-		evt.Tags = map[string]string{}
-	}
-	decision := p.filterEngine.Evaluate(&evt)
-	evt.Tags["collector_decision"] = decisionTag(decision)
-	if decision.MatchedRuleID != "" {
-		evt.Tags["matched_rule_id"] = decision.MatchedRuleID
-	}
-	if decision.Drop {
-		p.stats.AddDropped(decision.MatchedRuleID, decision.Reason, decision.Sampled)
-		return
-	}
-	p.stats.AddDecision(decisionTag(decision), decision.MatchedRuleID, decision.Sampled)
-	p.ProcessNormalizedWithDecision(evt, decision)
+	p.ingest(evt, "api")
 }
 
-func (p *Processor) ProcessNormalizedWithDecision(evt event.Event, decision filter.Decision) {
+// ingest is the single shared processing function used by all ingestion paths.
+// It: normalises the source_type, assigns an ID if absent, evaluates rules,
+// enriches tags, stores locally, and forwards to DMZ — all in one place.
+func (p *Processor) ingest(evt event.Event, ingestionPath string) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	// ── 1. Baseline defaults ────────────────────────────────────────────────
+	if evt.ID == "" {
+		evt.ID = event.NewID()
+	}
 	if evt.ReceivedAt == "" {
-		evt.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		evt.ReceivedAt = now
 	}
 	if evt.Timestamp == "" {
 		evt.Timestamp = evt.ReceivedAt
@@ -334,15 +407,65 @@ func (p *Processor) ProcessNormalizedWithDecision(evt event.Event, decision filt
 		evt.Zone = p.zone
 	}
 	if evt.Protocol == "" {
-		evt.Protocol = "syslog"
+		evt.Protocol = "json"
 	}
 	if evt.Tags == nil {
 		evt.Tags = map[string]string{}
 	}
 
+	// ── 2. Canonical source_type (before rule matching) ────────────────────
+	evt.SourceType = normalizeSourceType(evt.SourceType)
+
+	// ── 3. Rule evaluation ─────────────────────────────────────────────────
+	var decision filter.Decision
+	if ingestionPath == "syslog_udp" || ingestionPath == "syslog_tcp" {
+		// Syslog paths get rate-limiting and deduplication.
+		decision = p.filterEngine.Evaluate(&evt)
+	} else {
+		// API / test paths: rules only — no flood controls.
+		decision = p.filterEngine.EvaluateRulesOnly(&evt)
+	}
+
+	// ── 4. Resolve actual forwarding intent ────────────────────────────────
+	fcfg := p.forwardingCfg.Get()
+	willForward := (decision.Forward || (fcfg.Enabled && !fcfg.ForwardOnlyFiltered)) &&
+		p.forwarder.Enabled()
+
+	// ── 5. Enrich tags ─────────────────────────────────────────────────────
+	evt.Tags["collector_decision"] = decisionLabel(decision, willForward)
+	evt.Tags["siem_index_hint"] = siemIndexHint(evt.SourceType)
+	evt.Tags["splunk_sourcetype"] = splunkSourcetype(evt.SourceType)
+	evt.Tags["ingestion_path"] = ingestionPath
+	if decision.MatchedRuleID != "" {
+		evt.Tags["matched_rule_id"] = decision.MatchedRuleID
+	}
+
+	// ── 6. Per-event debug log ─────────────────────────────────────────────
+	p.logger.Debug("event ingested",
+		"event_id", evt.ID,
+		"source_type", evt.SourceType,
+		"ingestion_path", ingestionPath,
+		"matched_rule_id", decision.MatchedRuleID,
+		"action", decision.Reason,
+		"store_locally", decision.Store,
+		"forward_to_dmz", decision.Forward,
+		"forward_attempted", willForward,
+	)
+
+	// ── 7. Drop ────────────────────────────────────────────────────────────
+	if decision.Drop {
+		p.stats.AddDropped(decision.MatchedRuleID, decision.Reason, decision.Sampled)
+		p.logger.Debug("event dropped", "event_id", evt.ID, "reason", decision.Reason)
+		return
+	}
+
+	label := decisionLabel(decision, willForward)
+	p.stats.AddDecision(label, decision.MatchedRuleID, decision.Sampled)
+
+	// ── 8. Store locally ───────────────────────────────────────────────────
 	if decision.Store {
 		if err := p.store.Append(evt); err != nil {
-			p.logger.Error("failed to append event", "error", err)
+			p.logger.Error("failed to append event", "error", err, "event_id", evt.ID)
 		} else {
 			p.stats.AddStored(evt)
 			if decision.Show {
@@ -351,41 +474,25 @@ func (p *Processor) ProcessNormalizedWithDecision(evt event.Event, decision filt
 		}
 	}
 
-	fcfg := p.forwardingCfg.Get()
-	shouldForward := decision.Forward || (fcfg.Enabled && !fcfg.ForwardOnlyFiltered)
-	if shouldForward && p.forwarder.Enabled() {
+	// ── 9. Forward to DMZ (async, non-blocking) ────────────────────────────
+	if willForward {
 		go func(evt event.Event) {
-			if err := p.forwarder.Send(context.Background(), evt); err != nil {
-				p.logger.Warn("dmz forwarding failed", "error", err, "event_id", evt.ID)
-				now := time.Now().UTC().Format(time.RFC3339Nano)
+			err := p.forwarder.Send(context.Background(), evt)
+			ts := time.Now().UTC().Format(time.RFC3339Nano)
+			if err != nil {
+				p.logger.Warn("dmz forwarding failed",
+					"event_id", evt.ID,
+					"ingestion_path", ingestionPath,
+					"error", err,
+				)
 				p.stats.AddForwardResult(false, "")
-				_ = p.forwardingCfg.UpdateForwardResult(false, now, err.Error())
+				_ = p.forwardingCfg.UpdateForwardResult(false, ts, err.Error())
 			} else {
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				p.stats.AddForwardResult(true, now)
-				_ = p.forwardingCfg.UpdateForwardResult(true, now, "")
+				p.stats.AddForwardResult(true, ts)
+				_ = p.forwardingCfg.UpdateForwardResult(true, ts, "")
 			}
 		}(evt)
 	}
-}
-
-func decisionTag(d filter.Decision) string {
-	if d.Drop {
-		return "drop"
-	}
-	if d.Store && d.Forward {
-		return "forward"
-	}
-	if d.Store && !d.Forward {
-		if d.Sampled {
-			return "sample"
-		}
-		return "store_only"
-	}
-	if !d.Store && d.Forward {
-		return "forward_only"
-	}
-	return "store_only"
 }
 
 func (p *Processor) CurrentFilterConfig() map[string]any {
@@ -405,7 +512,8 @@ func (p *Processor) SetRules(rules []config.RuleConfig) {
 }
 
 func (p *Processor) RuleTest(evt event.Event) filter.Decision {
-	return p.filterEngine.Evaluate(&evt)
+	evt.SourceType = normalizeSourceType(evt.SourceType)
+	return p.filterEngine.EvaluateRulesOnly(&evt)
 }
 
 func (p *Processor) ForwardingConfig() config.ForwardingConfig {

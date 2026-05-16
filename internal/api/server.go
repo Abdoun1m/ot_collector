@@ -94,6 +94,8 @@ func (a *API) Run(ctx context.Context) error {
 	mux.HandleFunc("/config/rules/test", a.handleConfigRulesTest)
 	mux.HandleFunc("/config/forwarding", a.handleConfigForwarding)
 	mux.HandleFunc("/forwarding/test", a.handleForwardingTest)
+	mux.HandleFunc("/forwarding/test-direct", a.handleForwardingTest)
+	mux.HandleFunc("/forwarding/test-pipeline", a.handleForwardingTestPipeline)
 	mux.HandleFunc("/test-event", a.handleTestEvent)
 
 	sub, err := fs.Sub(webassets.FS, ".")
