@@ -14,6 +14,9 @@ type Config struct {
 	EventsFile            string
 	DMZCollectorURL       string
 	ForwardTimeoutSeconds int
+	ForwardWorkers        int
+	ForwardQueueSize      int
+	ForwardMaxAgeSecs     int
 	LogLevel              slog.Level
 }
 
@@ -26,6 +29,9 @@ func Load() Config {
 		EventsFile:            getenv("EVENTS_FILE", "/data/events.jsonl"),
 		DMZCollectorURL:       getenv("DMZ_COLLECTOR_URL", ""),
 		ForwardTimeoutSeconds: parseIntEnv("FORWARD_TIMEOUT_SECONDS", 10),
+		ForwardWorkers:        parseIntEnv("FORWARD_WORKERS", 4),
+		ForwardQueueSize:      parseIntEnv("FORWARD_QUEUE_SIZE", 2048),
+		ForwardMaxAgeSecs:     parseIntEnv("FORWARD_MAX_AGE_SECONDS", 30),
 		LogLevel:              parseLevel(getenv("LOG_LEVEL", "info")),
 	}
 	return cfg

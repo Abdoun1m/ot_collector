@@ -181,20 +181,20 @@ func (s *Stats) Summary() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return map[string]any{
-		"total_events":             s.total,
-		"by_source_type":           cloneMap(s.bySourceType),
-		"by_severity":              cloneMap(s.bySeverity),
-		"by_category":              cloneMap(s.byCategory),
-		"top_assets":               topN(s.byAsset, 5),
-		"top_commands":             topN(s.byCommand, 10),
-		"stored_count":             s.storedCount,
-		"dropped_count":            s.droppedCount,
-		"sampled_count":            s.sampledCount,
-		"forwarded_count":          s.forwardedCount,
-		"failed_forward_count":     s.failedForwardCnt,
-		"by_rule":                  cloneMap(s.byRule),
-		"by_decision":              cloneMap(s.byDecision),
-		"event_rate_per_second":    s.rateEPS,
+		"total_events":                 s.total,
+		"by_source_type":               cloneMap(s.bySourceType),
+		"by_severity":                  cloneMap(s.bySeverity),
+		"by_category":                  cloneMap(s.byCategory),
+		"top_assets":                   topN(s.byAsset, 5),
+		"top_commands":                 topN(s.byCommand, 10),
+		"stored_count":                 s.storedCount,
+		"dropped_count":                s.droppedCount,
+		"sampled_count":                s.sampledCount,
+		"forwarded_count":              s.forwardedCount,
+		"failed_forward_count":         s.failedForwardCnt,
+		"by_rule":                      cloneMap(s.byRule),
+		"by_decision":                  cloneMap(s.byDecision),
+		"event_rate_per_second":        s.rateEPS,
 		"last_successful_forward_time": s.lastForwardOK,
 	}
 }
@@ -258,7 +258,10 @@ func parseMinuteBucket(ts string) string {
 }
 
 func topN(m map[string]int64, n int) []map[string]any {
-	type kv struct{ Key string; Count int64 }
+	type kv struct {
+		Key   string
+		Count int64
+	}
 	items := make([]kv, 0, len(m))
 	for k, v := range m {
 		items = append(items, kv{k, v})
@@ -274,15 +277,19 @@ func topN(m map[string]int64, n int) []map[string]any {
 	return out
 }
 
+// Processor is the single shared processing core for all ingestion paths.
 type Processor struct {
-	zone           string
-	store          *storage.JSONLStore
-	forwarder      *forwarder.Forwarder
-	stats          *Stats
-	filterEngine   *filter.Engine
-	streamHub      *api.StreamHub
-	forwardingCfg  *config.ForwardingStore
-	logger         *slog.Logger
+	mu sync.RWMutex // protects forwarder and forwardQueue hot-swaps
+
+	zone          string
+	store         *storage.JSONLStore
+	forwarder     *forwarder.Forwarder
+	forwardQueue  *forwarder.ForwardQueue
+	stats         *Stats
+	filterEngine  *filter.Engine
+	streamHub     *api.StreamHub
+	forwardingCfg *config.ForwardingStore
+	logger        *slog.Logger
 	forwardTimeout int
 }
 
@@ -327,26 +334,27 @@ func siemIndexHint(sourceType string) string {
 	}
 }
 
+// splunkSourcetype returns the labshock:namespace:type sourcetype for SIEM routing.
 func splunkSourcetype(sourceType string) string {
 	switch sourceType {
 	case "firewall":
-		return "ot:firewall"
+		return "labshock:net:firewall"
 	case "opcua":
-		return "ot:opcua"
+		return "labshock:ot:opcua"
 	case "gds_agent":
-		return "ot:gds_agent"
+		return "labshock:ot:gds"
 	case "scada":
-		return "ot:scada"
+		return "labshock:ot:scada"
 	case "plc":
-		return "ot:plc"
+		return "labshock:ot:plc"
 	case "ids":
-		return "ot:ids"
+		return "labshock:ot:ids"
 	case "ews":
-		return "ot:ews"
+		return "labshock:ot:ews"
 	case "vault":
-		return "ot:vault"
+		return "labshock:ot:vault"
 	default:
-		return "ot:generic"
+		return "labshock:ot:unknown"
 	}
 }
 
@@ -371,6 +379,23 @@ func decisionLabel(d filter.Decision, willForward bool) string {
 	return "store_only"
 }
 
+// decisionHint encodes the rule engine's raw decision for observability.
+func decisionHint(d filter.Decision) string {
+	if d.Drop {
+		return "drop"
+	}
+	if d.Store && d.Forward {
+		return "store_forward"
+	}
+	if d.Store {
+		return "store_only"
+	}
+	if d.Forward {
+		return "forward_only"
+	}
+	return "store_only"
+}
+
 // ProcessRaw is the syslog ingestion entry point (UDP/TCP).
 // It parses the raw syslog line, normalises it, then runs the full ingest pipeline
 // with rate-limiting and deduplication enabled.
@@ -388,8 +413,8 @@ func (p *Processor) ProcessNormalized(evt event.Event) {
 }
 
 // ingest is the single shared processing function used by all ingestion paths.
-// It: normalises the source_type, assigns an ID if absent, evaluates rules,
-// enriches tags, stores locally, and forwards to DMZ — all in one place.
+// It normalises source_type, assigns an ID if absent, evaluates rules,
+// enriches tags, stores locally, and enqueues for async DMZ forwarding.
 func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -427,17 +452,34 @@ func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 	}
 
 	// ── 4. Resolve actual forwarding intent ────────────────────────────────
+	// CRITICAL: if a rule matched, honour the rule's Forward flag.
+	// Only fall back to global ForwardOnlyFiltered when no rule matched.
+	// Without this, store_only rules would still forward via global config.
 	fcfg := p.forwardingCfg.Get()
-	willForward := (decision.Forward || (fcfg.Enabled && !fcfg.ForwardOnlyFiltered)) &&
-		p.forwarder.Enabled()
+	p.mu.RLock()
+	fwdEnabled := fcfg.Enabled && p.forwarder.Enabled()
+	p.mu.RUnlock()
+
+	var willForward bool
+	if !decision.Drop {
+		if decision.MatchedRuleID != "" {
+			willForward = decision.Forward && fwdEnabled
+		} else {
+			willForward = !fcfg.ForwardOnlyFiltered && fwdEnabled
+		}
+	}
 
 	// ── 5. Enrich tags ─────────────────────────────────────────────────────
+	evt.Tags["ingestion_path"] = ingestionPath
 	evt.Tags["collector_decision"] = decisionLabel(decision, willForward)
+	evt.Tags["collector_decision_hint"] = decisionHint(decision)
 	evt.Tags["siem_index_hint"] = siemIndexHint(evt.SourceType)
 	evt.Tags["splunk_sourcetype"] = splunkSourcetype(evt.SourceType)
-	evt.Tags["ingestion_path"] = ingestionPath
 	if decision.MatchedRuleID != "" {
 		evt.Tags["matched_rule_id"] = decision.MatchedRuleID
+	}
+	if willForward {
+		evt.Tags["forwarding_status"] = "queued"
 	}
 
 	// ── 6. Per-event debug log ─────────────────────────────────────────────
@@ -449,7 +491,7 @@ func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 		"action", decision.Reason,
 		"store_locally", decision.Store,
 		"forward_to_dmz", decision.Forward,
-		"forward_attempted", willForward,
+		"will_forward", willForward,
 	)
 
 	// ── 7. Drop ────────────────────────────────────────────────────────────
@@ -474,24 +516,56 @@ func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 		}
 	}
 
-	// ── 9. Forward to DMZ (async, non-blocking) ────────────────────────────
+	// ── 9. Enqueue for async DMZ forwarding ────────────────────────────────
 	if willForward {
-		go func(evt event.Event) {
-			err := p.forwarder.Send(context.Background(), evt)
-			ts := time.Now().UTC().Format(time.RFC3339Nano)
-			if err != nil {
-				p.logger.Warn("dmz forwarding failed",
+		p.mu.RLock()
+		fq := p.forwardQueue
+		p.mu.RUnlock()
+		if fq != nil {
+			if !fq.Enqueue(forwarder.ForwardTask{
+				Evt:           evt,
+				IngestionPath: ingestionPath,
+				EnqueuedAt:    time.Now(),
+			}) {
+				p.logger.Warn("forward queue full, event dropped from queue",
 					"event_id", evt.ID,
 					"ingestion_path", ingestionPath,
-					"error", err,
 				)
-				p.stats.AddForwardResult(false, "")
-				_ = p.forwardingCfg.UpdateForwardResult(false, ts, err.Error())
-			} else {
-				p.stats.AddForwardResult(true, ts)
-				_ = p.forwardingCfg.UpdateForwardResult(true, ts, "")
 			}
-		}(evt)
+		}
+	}
+}
+
+// handleForwardResult is called by the ForwardQueue worker pool after each send attempt.
+func (p *Processor) handleForwardResult(result forwarder.ForwardResult) {
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	if result.Skipped {
+		p.logger.Debug("forward skipped",
+			"event_id", result.EventID,
+			"ingestion_path", result.IngestionPath,
+			"skip_reason", result.SkipReason,
+		)
+		return
+	}
+	if result.Err != nil {
+		p.logger.Warn("dmz forwarding failed",
+			"event_id", result.EventID,
+			"ingestion_path", result.IngestionPath,
+			"http_status", result.HTTPStatus,
+			"elapsed_ms", result.ElapsedMS,
+			"error", result.Err,
+		)
+		p.stats.AddForwardResult(false, "")
+		_ = p.forwardingCfg.UpdateForwardResult(false, ts, result.Err.Error(), result.EventID)
+	} else {
+		p.logger.Debug("dmz forwarding succeeded",
+			"event_id", result.EventID,
+			"ingestion_path", result.IngestionPath,
+			"http_status", result.HTTPStatus,
+			"elapsed_ms", result.ElapsedMS,
+		)
+		p.stats.AddForwardResult(true, ts)
+		_ = p.forwardingCfg.UpdateForwardResult(true, ts, "", result.EventID)
 	}
 }
 
@@ -516,16 +590,50 @@ func (p *Processor) RuleTest(evt event.Event) filter.Decision {
 	return p.filterEngine.EvaluateRulesOnly(&evt)
 }
 
+// ForwardingConfig returns the current forwarding config, with live queue stats.
 func (p *Processor) ForwardingConfig() config.ForwardingConfig {
-	return p.forwardingCfg.Get()
+	cfg := p.forwardingCfg.Get()
+	p.mu.RLock()
+	fq := p.forwardQueue
+	p.mu.RUnlock()
+	if fq != nil {
+		cfg.QueuedCount = fq.QueuedCount()
+		cfg.InFlightCount = fq.InFlightCount()
+	}
+	return cfg
 }
 
 func (p *Processor) UpdateForwardingConfig(cfg config.ForwardingConfig) error {
 	if err := p.forwardingCfg.Replace(cfg); err != nil {
 		return err
 	}
+	p.mu.Lock()
 	p.forwarder = forwarder.New(cfg.DMZCollectorURL, p.logger, p.forwardTimeout)
+	p.mu.Unlock()
 	return nil
+}
+
+// ForwardQueueStats returns the current pending and in-flight counts.
+func (p *Processor) ForwardQueueStats() (queued, inflight int64) {
+	p.mu.RLock()
+	fq := p.forwardQueue
+	p.mu.RUnlock()
+	if fq == nil {
+		return 0, 0
+	}
+	return fq.QueuedCount(), fq.InFlightCount()
+}
+
+// ResetForwardQueue drains all pending (not yet in-flight) tasks from the
+// forward queue and returns the count discarded.  It never touches data files.
+func (p *Processor) ResetForwardQueue() int64 {
+	p.mu.RLock()
+	fq := p.forwardQueue
+	p.mu.RUnlock()
+	if fq == nil {
+		return 0
+	}
+	return fq.Drain()
 }
 
 func main() {
@@ -567,6 +675,8 @@ func main() {
 	filterEngine := filter.New()
 	filterEngine.SetRules(ruleStore.All())
 
+	// Build the processor first (forwardQueue is assigned below after the
+	// processor pointer is stable so the closure can capture it safely).
 	processor := &Processor{
 		zone:           cfg.Zone,
 		store:          store,
@@ -578,6 +688,24 @@ func main() {
 		logger:         logger,
 		forwardTimeout: cfg.ForwardTimeoutSeconds,
 	}
+
+	// The doSend closure reads processor.forwarder under mu so that a live
+	// UpdateForwardingConfig swap is always picked up by queue workers.
+	processor.forwardQueue = forwarder.NewForwardQueue(
+		ctx,
+		cfg.ForwardWorkers,
+		cfg.ForwardQueueSize,
+		time.Duration(cfg.ForwardMaxAgeSecs)*time.Second,
+		time.Duration(cfg.ForwardTimeoutSeconds)*time.Second,
+		func(fctx context.Context, evt event.Event) (int, error) {
+			processor.mu.RLock()
+			f := processor.forwarder
+			processor.mu.RUnlock()
+			return f.SendWithStatus(fctx, evt)
+		},
+		processor.handleForwardResult,
+		logger,
+	)
 
 	incoming := make(chan syslog.IncomingLog, 2048)
 	var wg sync.WaitGroup
@@ -662,4 +790,3 @@ func extractPort(addr string) int {
 	}
 	return n
 }
-

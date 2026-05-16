@@ -37,18 +37,27 @@ func (f *Forwarder) Enabled() bool {
 	return f.url != ""
 }
 
+// Send forwards an event to the DMZ collector. Returns an error on network or
+// non-2xx response. Prefer SendWithStatus when the HTTP status code is needed.
 func (f *Forwarder) Send(ctx context.Context, evt event.Event) error {
+	_, err := f.SendWithStatus(ctx, evt)
+	return err
+}
+
+// SendWithStatus forwards an event and returns the HTTP status code alongside
+// any error. Status is 0 when the request never reached the server.
+func (f *Forwarder) SendWithStatus(ctx context.Context, evt event.Event) (int, error) {
 	if !f.Enabled() {
-		return nil
+		return 0, nil
 	}
 	body, err := json.Marshal(evt)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := f.client.Do(req)
@@ -61,7 +70,7 @@ func (f *Forwarder) Send(ctx context.Context, evt event.Event) error {
 			"elapsed_ms", elapsedMS,
 			"error", err,
 		)
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
@@ -75,9 +84,9 @@ func (f *Forwarder) Send(ctx context.Context, evt event.Event) error {
 		"response_body_first_200_chars", respSnippet,
 	)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPStatusError{StatusCode: resp.StatusCode, Body: respSnippet}
+		return resp.StatusCode, &HTTPStatusError{StatusCode: resp.StatusCode, Body: respSnippet}
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 type HTTPStatusError struct {

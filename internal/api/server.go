@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Abdoun1m/ot_collector/internal/config"
 	"github.com/Abdoun1m/ot_collector/internal/event"
 	"github.com/Abdoun1m/ot_collector/internal/filter"
-	"github.com/Abdoun1m/ot_collector/internal/config"
 	"github.com/Abdoun1m/ot_collector/internal/sources"
 	"github.com/Abdoun1m/ot_collector/internal/storage"
 	webassets "github.com/Abdoun1m/ot_collector/web"
@@ -34,45 +34,47 @@ type Processor interface {
 	RuleTest(evt event.Event) filter.Decision
 	ForwardingConfig() config.ForwardingConfig
 	UpdateForwardingConfig(cfg config.ForwardingConfig) error
+	ForwardQueueStats() (queued, inflight int64)
+	ResetForwardQueue() int64
 }
 
 type API struct {
-	addr         string
-	zone         string
-	udpPort      int
-	tcpPort      int
-	apiPort      int
-	eventsFile   string
-	dmzEnabled   bool
-	store        *storage.JSONLStore
-	stats        StatsProvider
-	processor    Processor
-	streamHub    *StreamHub
-	sourceStore  *config.SourceStore
-	ruleStore    *config.RuleStore
+	addr            string
+	zone            string
+	udpPort         int
+	tcpPort         int
+	apiPort         int
+	eventsFile      string
+	dmzEnabled      bool
+	store           *storage.JSONLStore
+	stats           StatsProvider
+	processor       Processor
+	streamHub       *StreamHub
+	sourceStore     *config.SourceStore
+	ruleStore       *config.RuleStore
 	forwardingStore *config.ForwardingStore
-	knownSources map[string]sources.SourceInfo
-	logger       *slog.Logger
+	knownSources    map[string]sources.SourceInfo
+	logger          *slog.Logger
 }
 
 func New(addr string, zone string, udpPort int, tcpPort int, apiPort int, eventsFile string, dmzEnabled bool, store *storage.JSONLStore, stats StatsProvider, processor Processor, sourceStore *config.SourceStore, ruleStore *config.RuleStore, forwardingStore *config.ForwardingStore, streamHub *StreamHub, logger *slog.Logger) *API {
 	return &API{
-		addr:         addr,
-		zone:         zone,
-		udpPort:      udpPort,
-		tcpPort:      tcpPort,
-		apiPort:      apiPort,
-		eventsFile:   eventsFile,
-		dmzEnabled:   dmzEnabled,
-		store:        store,
-		stats:        stats,
-		processor:    processor,
-		streamHub:    streamHub,
-		sourceStore:  sourceStore,
-		ruleStore:    ruleStore,
+		addr:            addr,
+		zone:            zone,
+		udpPort:         udpPort,
+		tcpPort:         tcpPort,
+		apiPort:         apiPort,
+		eventsFile:      eventsFile,
+		dmzEnabled:      dmzEnabled,
+		store:           store,
+		stats:           stats,
+		processor:       processor,
+		streamHub:       streamHub,
+		sourceStore:     sourceStore,
+		ruleStore:       ruleStore,
 		forwardingStore: forwardingStore,
-		knownSources: sources.Known(),
-		logger:       logger,
+		knownSources:    sources.Known(),
+		logger:          logger,
 	}
 }
 
@@ -96,6 +98,7 @@ func (a *API) Run(ctx context.Context) error {
 	mux.HandleFunc("/forwarding/test", a.handleForwardingTest)
 	mux.HandleFunc("/forwarding/test-direct", a.handleForwardingTest)
 	mux.HandleFunc("/forwarding/test-pipeline", a.handleForwardingTestPipeline)
+	mux.HandleFunc("/forwarding/reset-queue", a.handleForwardingResetQueue)
 	mux.HandleFunc("/test-event", a.handleTestEvent)
 
 	sub, err := fs.Sub(webassets.FS, ".")

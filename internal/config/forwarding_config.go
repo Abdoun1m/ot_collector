@@ -9,15 +9,21 @@ import (
 )
 
 type ForwardingConfig struct {
-	DMZCollectorURL         string `json:"dmz_collector_url"`
-	Enabled                 bool   `json:"enabled"`
-	ForwardOnlyFiltered     bool   `json:"forward_only_filtered_events"`
-	ForwardQueueStatus      string `json:"forward_queue_status"`
-	FailedForwardCount      int64  `json:"failed_forward_count"`
-	SuccessfulForwardCount  int64  `json:"successful_forward_count"`
+	DMZCollectorURL        string `json:"dmz_collector_url"`
+	Enabled                bool   `json:"enabled"`
+	ForwardOnlyFiltered    bool   `json:"forward_only_filtered_events"`
+	ForwardQueueStatus     string `json:"forward_queue_status"`
+	FailedForwardCount     int64  `json:"failed_forward_count"`
+	SuccessfulForwardCount int64  `json:"successful_forward_count"`
 	LastSuccessfulForwardAt string `json:"last_successful_forward_time"`
-	LastFailedForwardAt     string `json:"last_failed_forward_time"`
-	LastError               string `json:"last_error"`
+	LastFailedForwardAt    string `json:"last_failed_forward_time"`
+	LastForwardAttemptAt   string `json:"last_forward_attempt_at"`
+	LastForwardedEventID   string `json:"last_forwarded_event_id"`
+	LastFailedEventID      string `json:"last_failed_event_id"`
+	LastError              string `json:"last_error"`
+	// Runtime-only — populated at query time, not persisted meaningfully.
+	QueuedCount  int64 `json:"queued_count"`
+	InFlightCount int64 `json:"in_flight_count"`
 }
 
 type ForwardingStore struct {
@@ -50,16 +56,21 @@ func (s *ForwardingStore) Replace(cfg ForwardingConfig) error {
 	return s.persistLocked()
 }
 
-func (s *ForwardingStore) UpdateForwardResult(success bool, when string, errMsg string) error {
+// UpdateForwardResult records the outcome of a single forwarding attempt.
+// eventID is the ID of the event that was forwarded (or attempted).
+func (s *ForwardingStore) UpdateForwardResult(success bool, when, errMsg, eventID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.data.LastForwardAttemptAt = when
 	if success {
 		s.data.LastSuccessfulForwardAt = when
 		s.data.SuccessfulForwardCount++
+		s.data.LastForwardedEventID = eventID
 		s.data.LastError = ""
 	} else {
 		s.data.FailedForwardCount++
 		s.data.LastFailedForwardAt = when
+		s.data.LastFailedEventID = eventID
 		if errMsg != "" {
 			s.data.LastError = errMsg
 		}
@@ -89,6 +100,9 @@ func (s *ForwardingStore) loadOrInit() error {
 	if s.data.ForwardQueueStatus == "" {
 		s.data.ForwardQueueStatus = "ok"
 	}
+	// Reset runtime fields on load.
+	s.data.QueuedCount = 0
+	s.data.InFlightCount = 0
 	return s.persistLocked()
 }
 
@@ -99,4 +113,3 @@ func (s *ForwardingStore) persistLocked() error {
 	}
 	return os.WriteFile(s.path, b, 0o644)
 }
-

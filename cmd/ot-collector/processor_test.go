@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -54,7 +55,7 @@ func (m *mockDMZ) waitForID(id string, timeout time.Duration) (event.Event, bool
 }
 
 // newTestProcessor builds a Processor wired to a temp JSONL store and a mock DMZ.
-// The rule set is a catch-all store_and_forward rule so every event is stored and forwarded.
+// A catch-all store_and_forward rule ensures every event is stored and forwarded.
 func newTestProcessor(t *testing.T, dmz *mockDMZ) (*Processor, *storage.JSONLStore) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -94,7 +95,7 @@ func newTestProcessor(t *testing.T, dmz *mockDMZ) (*Processor, *storage.JSONLSto
 		ForwardOnlyFiltered: false,
 	})
 
-	return &Processor{
+	proc := &Processor{
 		zone:           "OT",
 		store:          store,
 		forwarder:      fwd,
@@ -104,12 +105,28 @@ func newTestProcessor(t *testing.T, dmz *mockDMZ) (*Processor, *storage.JSONLSto
 		forwardingCfg:  fwdStore,
 		logger:         slog.Default(),
 		forwardTimeout: 5,
-	}, store
+	}
+	// Create the queue after proc so handleForwardResult can be bound safely.
+	proc.forwardQueue = forwarder.NewForwardQueue(
+		context.Background(),
+		2, 100,
+		30*time.Second,
+		5*time.Second,
+		func(ctx context.Context, evt event.Event) (int, error) {
+			proc.mu.RLock()
+			f := proc.forwarder
+			proc.mu.RUnlock()
+			return f.SendWithStatus(ctx, evt)
+		},
+		proc.handleForwardResult,
+		slog.Default(),
+	)
+	return proc, store
 }
 
 func readEventByID(t *testing.T, store *storage.JSONLStore, id string) (event.Event, bool) {
 	t.Helper()
-	// Small wait for synchronous storage append to complete.
+	// Short wait for the synchronous storage append to complete.
 	time.Sleep(30 * time.Millisecond)
 	evts, err := store.ReadFiltered(storage.EventQuery{Limit: 500})
 	if err != nil {
@@ -123,7 +140,7 @@ func readEventByID(t *testing.T, store *storage.JSONLStore, id string) (event.Ev
 	return event.Event{}, false
 }
 
-// ── Test 1: POST /events path — gds_agent event stored in OT and forwarded to DMZ ──
+// ── Test A: POST /events path — gds_agent event stored in OT and forwarded to DMZ ──
 
 func TestProcessNormalized_GDSAgent_StoreAndForward(t *testing.T) {
 	dmz := newMockDMZ()
@@ -159,7 +176,7 @@ func TestProcessNormalized_GDSAgent_StoreAndForward(t *testing.T) {
 	}
 }
 
-// ── Test 2: /test-event path — gds-agent (hyphen) normalised to gds_agent ──
+// ── Test B: POST /test-event path — gds-agent (hyphen) normalised and forwarded ──
 
 func TestProcessNormalized_GDSHyphen_NormalisedAndForwarded(t *testing.T) {
 	dmz := newMockDMZ()
@@ -193,7 +210,35 @@ func TestProcessNormalized_GDSHyphen_NormalisedAndForwarded(t *testing.T) {
 	}
 }
 
-// ── Test 3: Firewall event stored in OT and forwarded to DMZ ──
+// ── Test C: GDS-like event — splunk_sourcetype=labshock:ot:gds ──
+
+func TestProcessNormalized_GDS_SplunkSourcetype(t *testing.T) {
+	dmz := newMockDMZ()
+	defer dmz.srv.Close()
+	proc, store := newTestProcessor(t, dmz)
+
+	evtID := fmt.Sprintf("test-gds-spt-%d", time.Now().UnixNano())
+	proc.ProcessNormalized(event.Event{
+		ID:            evtID,
+		SourceType:    "gds_agent",
+		AssetIP:       "192.168.1.30",
+		EventCategory: "pki_validation",
+		Message:       "certificate_expiry_critical",
+	})
+
+	stored, ok := readEventByID(t, store, evtID)
+	if !ok {
+		t.Fatalf("event %s not found in OT storage", evtID)
+	}
+	if got := stored.Tags["splunk_sourcetype"]; got != "labshock:ot:gds" {
+		t.Errorf("splunk_sourcetype: want labshock:ot:gds, got %q", got)
+	}
+	if _, ok := dmz.waitForID(evtID, 3*time.Second); !ok {
+		t.Fatalf("GDS event %s not received in DMZ", evtID)
+	}
+}
+
+// ── Test D: Firewall event — source_type=firewall, splunk_sourcetype=labshock:net:firewall ──
 
 func TestProcessNormalized_Firewall_StoreAndForward(t *testing.T) {
 	dmz := newMockDMZ()
@@ -204,21 +249,29 @@ func TestProcessNormalized_Firewall_StoreAndForward(t *testing.T) {
 	proc.ProcessNormalized(event.Event{
 		ID:            evtID,
 		SourceType:    "firewall",
-		AssetIP:       "192.168.1.1",
+		AssetIP:       "192.168.1.254",
 		Severity:      "warn",
 		EventCategory: "security",
 		Message:       "firewall_block",
 	})
 
-	if _, ok := readEventByID(t, store, evtID); !ok {
+	stored, ok := readEventByID(t, store, evtID)
+	if !ok {
 		t.Fatalf("firewall event %s not found in OT storage", evtID)
 	}
+	if stored.SourceType != "firewall" {
+		t.Errorf("source_type: want firewall, got %s", stored.SourceType)
+	}
+	if got := stored.Tags["splunk_sourcetype"]; got != "labshock:net:firewall" {
+		t.Errorf("splunk_sourcetype: want labshock:net:firewall, got %q", got)
+	}
+
 	if _, ok := dmz.waitForID(evtID, 3*time.Second); !ok {
 		t.Fatalf("firewall event %s not received in DMZ", evtID)
 	}
 }
 
-// ── Test 4: opnsense alias normalised to firewall ──
+// ── Test D variant: opnsense alias normalised to firewall ──
 
 func TestNormalizeSourceType_OPNsense(t *testing.T) {
 	dmz := newMockDMZ()
@@ -229,6 +282,7 @@ func TestNormalizeSourceType_OPNsense(t *testing.T) {
 	proc.ProcessNormalized(event.Event{
 		ID:         evtID,
 		SourceType: "opnsense",
+		AssetIP:    "192.168.1.254",
 		Message:    "firewall event via opnsense alias",
 	})
 
@@ -239,9 +293,87 @@ func TestNormalizeSourceType_OPNsense(t *testing.T) {
 	if stored.SourceType != "firewall" {
 		t.Errorf("expected source_type=firewall after normalisation, got %s", stored.SourceType)
 	}
+	if got := stored.Tags["splunk_sourcetype"]; got != "labshock:net:firewall" {
+		t.Errorf("splunk_sourcetype: want labshock:net:firewall, got %q", got)
+	}
 }
 
-// ── Test 5: store_and_forward rule action sets both Store and Forward ──
+// ── Test E: /forwarding/test-direct — mock DMZ returns 202 ──
+
+func TestForwardingTestDirect_DMZReachable(t *testing.T) {
+	dmz := newMockDMZ()
+	defer dmz.srv.Close()
+
+	resp, err := http.Post(dmz.srv.URL+"/events", "application/json",
+		strings.NewReader(`{"id":"health-check","source_type":"test"}`))
+	if err != nil {
+		t.Fatalf("DMZ health check request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("DMZ health check: want 202, got %d", resp.StatusCode)
+	}
+}
+
+// ── Test F: /forwarding/test-pipeline — event appears in OT and DMZ ──
+
+func TestForwardingTestPipeline_OTandDMZ(t *testing.T) {
+	dmz := newMockDMZ()
+	defer dmz.srv.Close()
+	proc, store := newTestProcessor(t, dmz)
+
+	// Replicate what handleForwardingTestPipeline does.
+	now := time.Now().UTC()
+	testEvt := event.Event{
+		ID:            fmt.Sprintf("fwdpipeline-%d", now.UnixNano()),
+		Timestamp:     now.Format(time.RFC3339Nano),
+		ReceivedAt:    now.Format(time.RFC3339Nano),
+		Zone:          "OT",
+		SourceType:    "ot_collector",
+		AssetName:     "ot_collector",
+		Severity:      "info",
+		Protocol:      "json",
+		EventCategory: "system",
+		Message:       "forwarding pipeline test",
+		Tags:          map[string]string{"kind": "forwarding_pipeline_test"},
+	}
+	proc.ProcessNormalized(testEvt)
+
+	if _, ok := readEventByID(t, store, testEvt.ID); !ok {
+		t.Fatalf("pipeline test event %s not found in OT storage", testEvt.ID)
+	}
+	if _, ok := dmz.waitForID(testEvt.ID, 3*time.Second); !ok {
+		t.Fatalf("pipeline test event %s not received in DMZ", testEvt.ID)
+	}
+}
+
+// ── Test G: rule source_type="*" matches gds_agent ──
+
+func TestFilterEngine_WildcardMatchesGDSAgent(t *testing.T) {
+	eng := filter.New()
+	eng.SetRules([]config.RuleConfig{
+		{
+			ID:           "r-wild",
+			Enabled:      true,
+			SourceType:   "*",
+			Asset:        "*",
+			Category:     "*",
+			Severity:     "*",
+			Operation:    "*",
+			Action:       "store_and_forward",
+			ForwardToDMZ: true,
+			StoreLocally: true,
+			SampleRate:   1,
+		},
+	})
+	evt := &event.Event{SourceType: "gds_agent", Tags: map[string]string{}}
+	d := eng.EvaluateRulesOnly(evt)
+	if d.MatchedRuleID != "r-wild" {
+		t.Errorf("expected rule r-wild to match gds_agent, got matched_rule_id=%q", d.MatchedRuleID)
+	}
+}
+
+// ── store_and_forward action sets both Store and Forward ──
 
 func TestFilterEngine_StoreAndForwardAction(t *testing.T) {
 	eng := filter.New()
@@ -273,33 +405,7 @@ func TestFilterEngine_StoreAndForwardAction(t *testing.T) {
 	}
 }
 
-// ── Test 6: wildcard rule matches gds_agent ──
-
-func TestFilterEngine_WildcardMatchesGDSAgent(t *testing.T) {
-	eng := filter.New()
-	eng.SetRules([]config.RuleConfig{
-		{
-			ID:           "r-wild",
-			Enabled:      true,
-			SourceType:   "*",
-			Asset:        "*",
-			Category:     "*",
-			Severity:     "*",
-			Operation:    "*",
-			Action:       "store_and_forward",
-			ForwardToDMZ: true,
-			StoreLocally: true,
-			SampleRate:   1,
-		},
-	})
-	evt := &event.Event{SourceType: "gds_agent", Tags: map[string]string{}}
-	d := eng.EvaluateRulesOnly(evt)
-	if d.MatchedRuleID != "r-wild" {
-		t.Errorf("expected rule r-wild to match gds_agent, got matched_rule_id=%q", d.MatchedRuleID)
-	}
-}
-
-// ── Test 7: ID preserved through ingest ──
+// ── ID is preserved through ingest ──
 
 func TestProcessNormalized_IDPreserved(t *testing.T) {
 	dmz := newMockDMZ()
@@ -330,7 +436,7 @@ func TestProcessNormalized_IDPreserved(t *testing.T) {
 	}
 }
 
-// ── Test 8: collector_decision tag is store_and_forward when forwarding occurs ──
+// ── collector_decision tag reflects actual forwarding intent ──
 
 func TestProcessNormalized_CollectorDecisionTag(t *testing.T) {
 	dmz := newMockDMZ()
@@ -354,12 +460,12 @@ func TestProcessNormalized_CollectorDecisionTag(t *testing.T) {
 	if stored.Tags["siem_index_hint"] == "" {
 		t.Error("siem_index_hint tag is empty")
 	}
-	if stored.Tags["splunk_sourcetype"] == "" {
-		t.Error("splunk_sourcetype tag is empty")
+	if got := stored.Tags["splunk_sourcetype"]; got != "labshock:ot:gds" {
+		t.Errorf("splunk_sourcetype: want labshock:ot:gds, got %q", got)
 	}
 }
 
-// ── Test 9: API events bypass dedup (two identical messages both stored) ──
+// ── API events bypass dedup (two identical messages both stored) ──
 
 func TestProcessNormalized_APIBypassesDedup(t *testing.T) {
 	dmz := newMockDMZ()
@@ -388,7 +494,7 @@ func TestProcessNormalized_APIBypassesDedup(t *testing.T) {
 	}
 }
 
-// ── Test 10: normalizeSourceType covers all documented aliases ──
+// ── normalizeSourceType covers all documented aliases ──
 
 func TestNormalizeSourceType_AllAliases(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -412,19 +518,108 @@ func TestNormalizeSourceType_AllAliases(t *testing.T) {
 	}
 }
 
-// ── Test 11: /forwarding/test-direct mock DMZ returns 202 ──
+// ── willForward honours rule forward flag; store_only rule must not forward ──
 
-func TestForwardingTestDirect_DMZReachable(t *testing.T) {
+func TestIngest_StoreOnlyRuleDoesNotForward(t *testing.T) {
 	dmz := newMockDMZ()
 	defer dmz.srv.Close()
 
-	resp, err := http.Post(dmz.srv.URL+"/events", "application/json",
-		strings.NewReader(`{"id":"health-check","source_type":"test"}`))
-	if err != nil {
-		t.Fatalf("DMZ health check request failed: %v", err)
+	tmpDir := t.TempDir()
+	store := storage.NewJSONLStore(tmpDir+"/events.jsonl", slog.Default())
+	fwd := forwarder.New(dmz.srv.URL+"/events", slog.Default(), 5)
+
+	eng := filter.New()
+	eng.SetRules([]config.RuleConfig{
+		{
+			ID: "store-only", Enabled: true,
+			SourceType: "*", Asset: "*", Category: "*", Severity: "*", Operation: "*",
+			Action: "store_only", StoreLocally: true, ForwardToDMZ: false,
+		},
+	})
+
+	fwdStore, _ := config.NewForwardingStore(tmpDir + "/forwarding.json")
+	_ = fwdStore.Replace(config.ForwardingConfig{
+		DMZCollectorURL: dmz.srv.URL + "/events",
+		Enabled:         true, ForwardOnlyFiltered: false,
+	})
+
+	proc := &Processor{
+		zone: "OT", store: store, forwarder: fwd,
+		stats: NewStats(), filterEngine: eng,
+		streamHub: api.NewStreamHub(), forwardingCfg: fwdStore,
+		logger: slog.Default(), forwardTimeout: 5,
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		t.Errorf("DMZ health check: want 202, got %d", resp.StatusCode)
+	proc.forwardQueue = forwarder.NewForwardQueue(
+		context.Background(), 2, 100,
+		30*time.Second, 5*time.Second,
+		func(ctx context.Context, evt event.Event) (int, error) {
+			proc.mu.RLock()
+			f := proc.forwarder
+			proc.mu.RUnlock()
+			return f.SendWithStatus(ctx, evt)
+		},
+		proc.handleForwardResult, slog.Default(),
+	)
+
+	evtID := fmt.Sprintf("store-only-%d", time.Now().UnixNano())
+	proc.ProcessNormalized(event.Event{ID: evtID, SourceType: "gds_agent", Message: "store only"})
+
+	if _, ok := readEventByID(t, store, evtID); !ok {
+		t.Fatalf("store_only event %s not found in OT storage", evtID)
 	}
+	// Must NOT appear in DMZ.
+	if _, ok := dmz.waitForID(evtID, 500*time.Millisecond); ok {
+		t.Errorf("store_only event %s must not be forwarded to DMZ", evtID)
+	}
+}
+
+// ── ForwardQueue.Drain removes pending tasks ──
+
+func TestForwardQueue_Drain(t *testing.T) {
+	sent := make(chan struct{}, 10)
+	q := forwarder.NewForwardQueue(
+		context.Background(),
+		1, 50,
+		0, 5*time.Second,
+		func(ctx context.Context, evt event.Event) (int, error) {
+			sent <- struct{}{}
+			return 200, nil
+		},
+		nil,
+		slog.Default(),
+	)
+
+	// Pause the worker by making the send block.
+	block := make(chan struct{})
+	blockQ := forwarder.NewForwardQueue(
+		context.Background(),
+		1, 50,
+		0, 5*time.Second,
+		func(ctx context.Context, evt event.Event) (int, error) {
+			<-block
+			return 200, nil
+		},
+		nil,
+		slog.Default(),
+	)
+
+	// Enqueue one task to keep the worker busy.
+	blockQ.Enqueue(forwarder.ForwardTask{Evt: event.Event{ID: "blocker"}, EnqueuedAt: time.Now()})
+	time.Sleep(20 * time.Millisecond) // let the worker pick it up
+
+	// Enqueue 3 more into blockQ while worker is blocked.
+	for i := 0; i < 3; i++ {
+		blockQ.Enqueue(forwarder.ForwardTask{
+			Evt:        event.Event{ID: fmt.Sprintf("q-%d", i)},
+			EnqueuedAt: time.Now(),
+		})
+	}
+	drained := blockQ.Drain()
+	close(block) // unblock worker
+
+	if drained != 3 {
+		t.Errorf("Drain: want 3 tasks drained, got %d", drained)
+	}
+	_ = q
+	_ = sent
 }

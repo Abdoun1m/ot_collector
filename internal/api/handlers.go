@@ -423,6 +423,21 @@ func (a *API) handleForwardingTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleForwardingResetQueue drains all pending (not yet in-flight) tasks from
+// the forward queue.  It never deletes /data/events.jsonl or any config file.
+func (a *API) handleForwardingResetQueue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	drained := a.processor.ResetForwardQueue()
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"drained_count": drained,
+		"note":          "in-flight sends were not interrupted; only pending queue items were removed",
+	})
+}
+
 // handleForwardingTestPipeline injects a real test event through the full shared
 // ingest pipeline (rule evaluation, storage, async DMZ forwarding) and returns
 // the event ID so the caller can poll /events to verify end-to-end delivery.
