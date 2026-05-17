@@ -303,6 +303,8 @@ func normalizeSourceType(s string) string {
 		return "firewall"
 	case "fuxa":
 		return "scada"
+	case "fuxa_gds_client", "scada_gds", "scada_gds_helper":
+		return "scada_gds_client"
 	case "openplc":
 		return "plc"
 	case "nozomi":
@@ -312,26 +314,8 @@ func normalizeSourceType(s string) string {
 }
 
 func siemIndexHint(sourceType string) string {
-	switch sourceType {
-	case "firewall":
-		return "ot-firewall"
-	case "opcua":
-		return "ot-opcua"
-	case "gds_agent":
-		return "ot-gds-agent"
-	case "scada":
-		return "ot-scada"
-	case "plc":
-		return "ot-plc"
-	case "ids":
-		return "ot-ids"
-	case "ews":
-		return "ot-ews"
-	case "vault":
-		return "ot-vault"
-	default:
-		return "ot-generic"
-	}
+	_ = sourceType
+	return "ot_security"
 }
 
 // splunkSourcetype returns the labshock:namespace:type sourcetype for SIEM routing.
@@ -343,6 +327,8 @@ func splunkSourcetype(sourceType string) string {
 		return "labshock:ot:opcua"
 	case "gds_agent":
 		return "labshock:ot:gds"
+	case "scada_gds_client":
+		return "labshock:ot:scada:gds"
 	case "scada":
 		return "labshock:ot:scada"
 	case "plc":

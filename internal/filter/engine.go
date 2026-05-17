@@ -113,6 +113,9 @@ func (e *Engine) Evaluate(evt *event.Event) Decision {
 		rs.count++
 		e.rateBySource[sourceKey] = rs
 		if rs.count > maxEps {
+			if isProtectedEvent(evt) {
+				return Decision{Store: true, Forward: false, Show: true, Drop: false, Reason: "protected_override_rate_limit"}
+			}
 			return e.dropDecision("rate_limit", "", debugStoreDrop)
 		}
 	}
@@ -121,12 +124,24 @@ func (e *Engine) Evaluate(evt *event.Event) Decision {
 		dupKey := strings.Join([]string{evt.AssetIP, evt.SourceType, evt.Message}, "|")
 		if ds, ok := e.dedupCache[dupKey]; ok && now.Sub(ds.lastSeen) <= time.Duration(dedupSec)*time.Second {
 			e.dedupCache[dupKey] = dupState{lastSeen: now}
+			if isProtectedEvent(evt) {
+				return Decision{Store: true, Forward: false, Show: true, Drop: false, Reason: "protected_override_dedup"}
+			}
 			return e.dropDecision("duplicate_window", "", debugStoreDrop)
 		}
 		e.dedupCache[dupKey] = dupState{lastSeen: now}
 	}
 
-	return e.applyRules(evt, rules, debugStoreDrop)
+	d := e.applyRules(evt, rules, debugStoreDrop)
+	if d.Drop && isProtectedEvent(evt) {
+		return Decision{Store: true, Forward: false, Show: true, Drop: false, MatchedRuleID: d.MatchedRuleID, Reason: "protected_override_rule_drop"}
+	}
+	if d.Reason == "default_store_no_forward" {
+		if nd, ok := e.applySourceNoiseControl(evt); ok {
+			return nd
+		}
+	}
+	return d
 }
 
 // EvaluateRulesOnly applies only rule matching, skipping rate limiting and deduplication.
@@ -145,7 +160,16 @@ func (e *Engine) EvaluateRulesOnly(evt *event.Event) Decision {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 
-	return e.applyRules(evt, rules, debugStoreDrop)
+	d := e.applyRules(evt, rules, debugStoreDrop)
+	if d.Drop && isProtectedEvent(evt) {
+		return Decision{Store: true, Forward: false, Show: true, Drop: false, MatchedRuleID: d.MatchedRuleID, Reason: "protected_override_rule_drop"}
+	}
+	if d.Reason == "default_store_no_forward" {
+		if nd, ok := e.applySourceNoiseControl(evt); ok {
+			return nd
+		}
+	}
+	return d
 }
 
 // applyRules must be called with e.stateMu held (sample counter is updated inside).
@@ -198,6 +222,53 @@ func (e *Engine) applyRules(evt *event.Event, rules []config.RuleConfig, debugSt
 	}
 
 	return Decision{Store: true, Forward: false, Show: true, Drop: false, Reason: "default_store_no_forward"}
+}
+
+func (e *Engine) applySourceNoiseControl(evt *event.Event) (Decision, bool) {
+	if evt == nil {
+		return Decision{}, false
+	}
+	msg := strings.ToLower(strings.TrimSpace(evt.Message))
+	key := strings.Join([]string{"noise", evt.SourceType, evt.AssetIP, msg}, "|")
+
+	if evt.SourceType == "scada" && (msg == "scada_api_heartbeat" || msg == "scada_forwarder_heartbeat") {
+		e.sampleCounts[key]++
+		if e.sampleCounts[key]%10 != 1 {
+			return Decision{Drop: true, Reason: "noise_scada_heartbeat", Sampled: true}, true
+		}
+		return Decision{Store: true, Forward: false, Show: true, Drop: false, Sampled: true, Reason: "noise_scada_heartbeat_keep"}, true
+	}
+	if evt.SourceType == "scada" && (strings.Contains(msg, "daqstorage") || strings.Contains(msg, "plugin-installed")) {
+		return Decision{Store: true, Forward: false, Show: false, Drop: false, Reason: "noise_scada_startup_low_priority"}, true
+	}
+	if evt.SourceType == "ews" && msg == "ews_heartbeat" {
+		e.sampleCounts[key]++
+		if e.sampleCounts[key]%5 != 1 {
+			return Decision{Drop: true, Reason: "noise_ews_heartbeat", Sampled: true}, true
+		}
+		return Decision{Store: true, Forward: false, Show: true, Drop: false, Sampled: true, Reason: "noise_ews_heartbeat_keep"}, true
+	}
+	if evt.SourceType == "gds_agent" && msg == "sync_cycle_success" {
+		e.sampleCounts[key]++
+		if e.sampleCounts[key]%4 != 1 {
+			return Decision{Drop: true, Reason: "noise_gds_sync_success", Sampled: true}, true
+		}
+		return Decision{Store: true, Forward: false, Show: true, Drop: false, Sampled: true, Reason: "noise_gds_sync_success_keep"}, true
+	}
+
+	return Decision{}, false
+}
+
+func isProtectedEvent(evt *event.Event) bool {
+	if evt == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(evt.Message)) {
+	case "firewall_block", "plc_login_attempt", "unauthorized_write", "sensitive_write_accepted":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Engine) dropDecision(reason, ruleID string, debugStoreDrop bool) Decision {

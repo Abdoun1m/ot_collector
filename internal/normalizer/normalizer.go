@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Abdoun1m/ot_collector/internal/event"
+	"github.com/Abdoun1m/ot_collector/internal/normalizers"
 	"github.com/Abdoun1m/ot_collector/internal/sources"
 	"github.com/Abdoun1m/ot_collector/internal/syslog"
 )
@@ -17,10 +18,11 @@ func FromParsed(zone string, p syslog.ParsedMessage, sourceIP string) event.Even
 	resolved := sources.Resolve(sourceIP, p.Hostname, p.AppName, p.Message)
 
 	if payload := extractStructuredTelemetryJSON(p.Message); payload != nil {
-		return fromStructuredTelemetryJSON(sourceIP, zone, p, payload)
+		evt := fromStructuredTelemetryJSON(sourceIP, zone, p, payload)
+		return normalizers.Apply(evt, normalizers.Context{Parsed: p, SourceIP: sourceIP})
 	}
 	if evt, ok := parseOPNsenseFilterlog(zone, p, sourceIP, resolved); ok {
-		return evt
+		return normalizers.Apply(evt, normalizers.Context{Parsed: p, SourceIP: sourceIP})
 	}
 
 	src := resolved
@@ -35,7 +37,7 @@ func FromParsed(zone string, p syslog.ParsedMessage, sourceIP string) event.Even
 	}
 	enrichOPCUATags(p.Message, tags)
 
-	return event.Event{
+	evt := event.Event{
 		ID:            event.NewID(),
 		Timestamp:     p.Timestamp,
 		ReceivedAt:    time.Now().UTC().Format(time.RFC3339Nano),
@@ -50,6 +52,8 @@ func FromParsed(zone string, p syslog.ParsedMessage, sourceIP string) event.Even
 		Raw:           p.Raw,
 		Tags:          tags,
 	}
+
+	return normalizers.Apply(evt, normalizers.Context{Parsed: p, SourceIP: sourceIP})
 }
 
 func extractStructuredTelemetryJSON(message string) map[string]interface{} {

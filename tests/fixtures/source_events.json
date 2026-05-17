@@ -1,0 +1,45 @@
+[
+  {
+    "name": "firewall_block",
+    "source_ip": "192.168.1.254",
+    "parsed": {"message": "101,,,tracker,igb1,match,block,in,4,0x0,,63,26567,0,DF,6,tcp,60,192.168.20.10,192.168.1.62,40234,4840,0,S,3917296601,,64240,,mss", "hostname": "opnsense", "app_name": "filterlog", "format": "rfc3164"},
+    "expect": {"source_type": "firewall", "asset_name": "OPNsense OT Firewall", "event_category": "security", "message": "firewall_block", "splunk_sourcetype": "labshock:net:firewall"}
+  },
+  {
+    "name": "plc_login",
+    "source_ip": "192.168.1.20",
+    "parsed": {"message": "<14>May 17 00:00:49 INFO: [*] Attempting to login", "hostname": "openplc", "app_name": "openplc", "format": "raw"},
+    "expect": {"source_type": "plc", "asset_name": "PLC1", "event_category": "access_control", "message": "plc_login_attempt", "splunk_sourcetype": "labshock:ot:plc"}
+  },
+  {
+    "name": "scada_script_error",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "load.script error in startup", "hostname": "fuxa", "app_name": "labshock_scada", "format": "raw"},
+    "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "error", "message": "scada_script_load_error", "splunk_sourcetype": "labshock:ot:scada"}
+  },
+  {
+    "name": "ews_key_access",
+    "source_ip": "192.168.1.50",
+    "parsed": {"message": "private_key_access_attempt_or_skip", "hostname": "ews", "app_name": "ews_logger", "format": "raw"},
+    "expect": {"source_type": "ews", "asset_name": "Engineering Workstation", "event_category": "security", "message": "private_key_access_attempt_or_skip", "splunk_sourcetype": "labshock:ot:ews"}
+  },
+  {
+    "name": "opcua_unauthorized_write",
+    "source_ip": "192.168.1.62",
+    "parsed": {"message": "unauthorized_write", "hostname": "powergrid-opcua", "app_name": "powergrid_opcua_server", "format": "raw"},
+    "expect": {"source_type": "opcua", "asset_name": "OPC UA Server", "event_category": "access_control", "message": "unauthorized_write", "splunk_sourcetype": "labshock:ot:opcua"}
+  },
+  {
+    "name": "gds_cert_missing",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "gds_cert_missing_runtime", "hostname": "ot-agent", "app_name": "labshock_ot_gds_agent", "format": "raw"},
+    "expect": {"source_type": "gds_agent", "asset_name": "OT GDS Agent", "event_category": "pki_validation", "message": "gds_cert_missing_runtime", "splunk_sourcetype": "labshock:ot:gds"}
+  },
+  {
+    "name": "fuxa_gds_sig_invalid",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "trust_signature_invalid", "hostname": "fuxa", "app_name": "fuxa_gds_client", "format": "raw"},
+    "base": {"source_type": "scada_gds_client"},
+    "expect": {"source_type": "scada_gds_client", "asset_name": "FUXA SCADA GDS Client", "event_category": "security", "message": "trust_signature_invalid", "splunk_sourcetype": "labshock:ot:scada:gds"}
+  }
+]
