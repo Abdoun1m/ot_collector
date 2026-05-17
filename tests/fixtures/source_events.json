@@ -18,6 +18,34 @@
     "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "error", "message": "scada_script_load_error", "splunk_sourcetype": "labshock:ot:scada"}
   },
   {
+    "name": "scada_plc_read_memory_error",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "<131>May 17 15:28:53 localhost SCADA[29]: 2026-05-17T15:28:53.900Z [error] 'PLC1' _readMemory error! [object Object]", "hostname": "localhost", "app_name": "SCADA", "format": "raw"},
+    "base": {"source_type": "scada"},
+    "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "data_collection", "message": "scada_plc_read_memory_error", "splunk_sourcetype": "labshock:ot:scada"}
+  },
+  {
+    "name": "scada_plc_connection_attempt",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "2026-05-17T15:28:54.900Z [info] 'RAIL AUTO' try to connect 192.168.1.23", "hostname": "localhost", "app_name": "SCADA", "format": "raw"},
+    "base": {"source_type": "scada"},
+    "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "data_collection", "message": "scada_plc_connection_attempt", "splunk_sourcetype": "labshock:ot:scada"}
+  },
+  {
+    "name": "scada_opcua_connection_lost",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "2026-05-17T15:28:55.900Z [error] 'opcua' connection lost!", "hostname": "localhost", "app_name": "SCADA", "format": "raw"},
+    "base": {"source_type": "scada"},
+    "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "data_collection", "message": "scada_opcua_connection_lost", "splunk_sourcetype": "labshock:ot:scada"}
+  },
+  {
+    "name": "scada_connection_refused",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "2026-05-17T15:28:56.900Z [error] connect ECONNREFUSED 192.168.1.20:502", "hostname": "localhost", "app_name": "SCADA", "format": "raw"},
+    "base": {"source_type": "scada"},
+    "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "data_collection", "message": "scada_plc_connection_refused", "splunk_sourcetype": "labshock:ot:scada"}
+  },
+  {
     "name": "ews_key_access",
     "source_ip": "192.168.1.50",
     "parsed": {"message": "private_key_access_attempt_or_skip", "hostname": "ews", "app_name": "ews_logger", "format": "raw"},
