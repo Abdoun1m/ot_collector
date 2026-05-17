@@ -32,6 +32,13 @@
     "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "data_collection", "message": "scada_plc_connection_attempt", "splunk_sourcetype": "labshock:ot:scada"}
   },
   {
+    "name": "scada_plc1_connection_attempt",
+    "source_ip": "192.168.1.60",
+    "parsed": {"message": "2026-05-17T15:29:02.176Z [info] 'PLC1' try to connect 192.168.1.20", "hostname": "localhost", "app_name": "SCADA", "format": "raw"},
+    "base": {"source_type": "scada"},
+    "expect": {"source_type": "scada", "asset_name": "FUXA SCADA", "event_category": "data_collection", "message": "scada_plc_connection_attempt", "splunk_sourcetype": "labshock:ot:scada"}
+  },
+  {
     "name": "scada_opcua_connection_lost",
     "source_ip": "192.168.1.60",
     "parsed": {"message": "2026-05-17T15:28:55.900Z [error] 'opcua' connection lost!", "hostname": "localhost", "app_name": "SCADA", "format": "raw"},
