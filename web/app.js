@@ -1,29 +1,28 @@
-/* ── Palette matching styles.css CSS vars ────────────────── */
+/* ── Palette ─────────────────────────────────────────────── */
 const P = {
-  amber:   '#cf0f1d', amberHi: '#ff3344', amberLo: 'rgba(207,15,29,0.15)',
-  green:   '#ff6b35', greenLo: 'rgba(255,107,53,0.15)',
-  danger:  '#ff0a1a', dangerHi:'#ff2233', dangerLo:'rgba(255,10,26,0.15)',
-  cyan:    '#e8304a', cyanLo:  'rgba(232,48,74,0.15)',
-  warn:    '#ff8c42', warnLo:  'rgba(255,140,66,0.15)',
-  muted:   '#7a4040',
-  line:    '#2e1414',
-  ink:     '#f0d8d8',
-  panel:   '#0e0404',
+  red:      '#cf0f1d', redHi:    '#ff2233', redLo:    'rgba(207,15,29,0.15)',
+  orange:   '#e85020', orangeHi: '#ff7040', orangeLo: 'rgba(232,80,32,0.15)',
+  gold:     '#c8780a', goldHi:   '#ffaa22', goldLo:   'rgba(200,120,10,0.15)',
+  rose:     '#c01840', roseHi:   '#f03060', roseLo:   'rgba(192,24,64,0.15)',
+  cream:    '#f5d0c0',
+  muted:    '#804040',
+  line:     '#2c1010',
+  panel:    '#110404',
 };
 
-Chart.defaults.color          = P.muted;
-Chart.defaults.borderColor    = P.line;
-Chart.defaults.backgroundColor = P.amberLo;
-Chart.defaults.font.family    = "'Share Tech Mono', monospace";
-Chart.defaults.font.size      = 11;
+Chart.defaults.color       = P.muted;
+Chart.defaults.borderColor = P.line;
+Chart.defaults.font.family = "'Share Tech Mono', monospace";
+Chart.defaults.font.size   = 11;
 
+/* maintainAspectRatio: true prevents the grow-on-redraw loop */
 const CHART_OPTS_BASE = {
   responsive: true,
-  maintainAspectRatio: false,
-  plugins: { legend: { labels: { color: P.muted, boxWidth: 10, padding: 12 } } },
+  maintainAspectRatio: true,
+  plugins: { legend: { labels: { color: P.muted, boxWidth: 10, padding: 10 } } },
   scales: {
-    x: { ticks: { color: P.muted }, grid: { color: 'rgba(26,46,46,0.6)' } },
-    y: { ticks: { color: P.muted }, grid: { color: 'rgba(26,46,46,0.6)' } },
+    x: { ticks: { color: P.muted, maxRotation: 30 }, grid: { color: 'rgba(44,16,16,0.8)' } },
+    y: { ticks: { color: P.muted }, grid: { color: 'rgba(44,16,16,0.8)' } },
   },
 };
 
@@ -339,12 +338,12 @@ function renderDashboard(summary, timeline) {
   const threats   = (summary.by_category?.security || 0) + (summary.by_severity?.critical || 0);
 
   const kpiDefs = [
-    { label: 'total events',    val: fmtNum(total),     cls: '',         pct: Math.min(100, total / 10) },
-    { label: 'events / sec',    val: rate.toFixed(1),   cls: 'kpi-cyan', pct: Math.min(100, rate * 10) },
-    { label: 'forwarded',       val: fmtNum(forwarded), cls: 'kpi-green',pct: total ? forwarded/total*100 : 0 },
-    { label: 'dropped',         val: fmtNum(dropped),   cls: dropped > 0 ? 'kpi-red' : '', pct: total ? dropped/total*100 : 0 },
-    { label: 'sampled',         val: fmtNum(sampled),   cls: 'kpi-warn', pct: total ? sampled/total*100 : 0 },
-    { label: 'critical/sec threat', val: fmtNum(threats), cls: threats > 0 ? 'kpi-red' : '', pct: Math.min(100, threats) },
+    { label: 'total events',        val: fmtNum(total),     cls: '',           pct: Math.min(100, total / 10) },
+    { label: 'events / sec',        val: rate.toFixed(1),   cls: 'kpi-gold',   pct: Math.min(100, rate * 10) },
+    { label: 'forwarded',           val: fmtNum(forwarded), cls: 'kpi-orange', pct: total ? forwarded/total*100 : 0 },
+    { label: 'dropped',             val: fmtNum(dropped),   cls: dropped > 0 ? 'kpi-alert' : 'kpi-red', pct: total ? dropped/total*100 : 0 },
+    { label: 'sampled',             val: fmtNum(sampled),   cls: 'kpi-rose',   pct: total ? sampled/total*100 : 0 },
+    { label: 'critical / security', val: fmtNum(threats),   cls: threats > 0 ? 'kpi-alert' : '', pct: Math.min(100, threats) },
   ];
 
   kpis.innerHTML = kpiDefs.map(k => `
@@ -369,25 +368,36 @@ function renderDashboard(summary, timeline) {
   if (decisionChart) decisionChart.destroy();
   if (timelineChart) timelineChart.destroy();
 
-  const PIE_COLORS = ['#ff3344', '#e8304a', '#ff6b35', '#ff8c42', '#c4142a', '#ff1a2e', '#ff5566'];
-  const decColors  = decLabels.map(l => ({ keep: P.green, drop: P.dangerHi, sample: P.warn, forward: P.cyan, store: P.amber }[l] || P.muted));
+  /* Distinct red-family hues — enough contrast to be readable */
+  const PIE_COLORS = [P.redHi, P.orangeHi, P.goldHi, P.roseHi, P.orange, P.gold, P.rose];
+  const decColorMap = { keep: P.orangeHi, drop: P.redHi, sample: P.goldHi, forward_only: P.roseHi, store_only: P.cream };
+  const decColors   = decLabels.map(l => decColorMap[l] || P.muted);
+  const noLegend    = { ...CHART_OPTS_BASE, plugins: { legend: { display: false } } };
 
   sourceChart = new Chart(document.getElementById('c-source'), {
     type: 'doughnut',
-    data: { labels: srcLabels, datasets: [{ data: srcVals, backgroundColor: PIE_COLORS, borderColor: '#060d0d', borderWidth: 2 }] },
-    options: { ...CHART_OPTS_BASE, cutout: '55%', scales: {} },
+    data: { labels: srcLabels, datasets: [{ data: srcVals, backgroundColor: PIE_COLORS, borderColor: P.panel, borderWidth: 2 }] },
+    options: {
+      ...CHART_OPTS_BASE,
+      cutout: '52%',
+      scales: {},
+      plugins: { legend: { labels: { color: P.muted, boxWidth: 10, padding: 8 } } },
+    },
   });
 
   categoryChart = new Chart(document.getElementById('c-category'), {
     type: 'bar',
-    data: { labels: catLabels, datasets: [{ data: catVals, backgroundColor: P.amberLo, borderColor: P.amber, borderWidth: 1 }] },
-    options: { ...CHART_OPTS_BASE, plugins: { legend: { display: false } } },
+    data: { labels: catLabels, datasets: [{ data: catVals, backgroundColor: P.orangeLo, borderColor: P.orange, borderWidth: 1 }] },
+    options: noLegend,
   });
 
   decisionChart = new Chart(document.getElementById('c-decision'), {
     type: 'bar',
-    data: { labels: decLabels, datasets: [{ data: decVals, backgroundColor: decColors.map(c => c + '33'), borderColor: decColors, borderWidth: 1 }] },
-    options: { ...CHART_OPTS_BASE, plugins: { legend: { display: false } } },
+    data: {
+      labels: decLabels,
+      datasets: [{ data: decVals, backgroundColor: decColors.map(c => c + '28'), borderColor: decColors, borderWidth: 1.5 }],
+    },
+    options: noLegend,
   });
 
   timelineChart = new Chart(document.getElementById('c-timeline'), {
@@ -396,16 +406,16 @@ function renderDashboard(summary, timeline) {
       labels: tLabels,
       datasets: [{
         data: tVals,
-        borderColor: P.green,
-        backgroundColor: 'rgba(0,232,122,0.06)',
+        borderColor: P.redHi,
+        backgroundColor: 'rgba(207,15,29,0.08)',
         borderWidth: 1.5,
         pointRadius: 2,
-        pointBackgroundColor: P.green,
+        pointBackgroundColor: P.redHi,
         fill: true,
         tension: 0.3,
       }],
     },
-    options: { ...CHART_OPTS_BASE, plugins: { legend: { display: false } } },
+    options: noLegend,
   });
 }
 
