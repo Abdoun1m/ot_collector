@@ -1,0 +1,74 @@
+[
+  {
+    "name": "rail_auto_try_to_connect",
+    "line": "2026-05-17T15:43:04.000Z [info] 'RAIL AUTO' try to connect 192.168.1.23",
+    "expect": {
+      "message": "scada_plc_connection_attempt",
+      "event_category": "data_collection",
+      "severity": "info",
+      "target": "RAIL AUTO",
+      "target_ip": "192.168.1.23",
+      "risk_level": "LOW"
+    }
+  },
+  {
+    "name": "plc1_try_to_connect",
+    "line": "2026-05-17T15:43:04.000Z [info] 'PLC1' try to connect 192.168.1.20",
+    "expect": {
+      "message": "scada_plc_connection_attempt",
+      "event_category": "data_collection",
+      "severity": "info",
+      "target": "PLC1",
+      "target_ip": "192.168.1.20",
+      "risk_level": "LOW"
+    }
+  },
+  {
+    "name": "unquoted_target_try_to_connect",
+    "line": "2026-05-17T15:43:04.000Z [info] PLC1 try to connect 192.168.1.20",
+    "expect": {
+      "message": "scada_plc_connection_attempt",
+      "event_category": "data_collection",
+      "severity": "info",
+      "target": "PLC1",
+      "target_ip": "192.168.1.20",
+      "risk_level": "LOW"
+    }
+  },
+  {
+    "name": "connection_error_with_target",
+    "line": "2026-05-17T15:43:04.000Z [error] 'PLC1' try to connect error!",
+    "expect": {
+      "message": "scada_plc_connection_error",
+      "event_category": "data_collection",
+      "severity": "warning",
+      "target": "PLC1",
+      "target_ip": null,
+      "risk_level": "MEDIUM"
+    }
+  },
+  {
+    "name": "generic_connection_error",
+    "line": "2026-05-17T15:43:04.000Z [error] connect error!",
+    "expect": {
+      "message": "scada_plc_connection_error",
+      "event_category": "data_collection",
+      "severity": "error",
+      "target": null,
+      "target_ip": null,
+      "risk_level": "MEDIUM"
+    }
+  },
+  {
+    "name": "connected_event",
+    "line": "2026-05-17T15:43:04.000Z [info] 'RAIL AUTO' connected!",
+    "expect": {
+      "message": "scada_plc_connected",
+      "event_category": "data_collection",
+      "severity": "info",
+      "target": "RAIL AUTO",
+      "target_ip": null,
+      "risk_level": "LOW"
+    }
+  }
+]
