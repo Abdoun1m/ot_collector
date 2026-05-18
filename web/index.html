@@ -4,16 +4,24 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DataProtect OT Collector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
+
   <header class="topbar">
-    <div>
-      <h1>DataProtect OT Collector</h1>
-      <small>LabShock Cyber-Range</small>
+    <div class="topbar-brand">
+      <div class="topbar-shield">&#9632;</div>
+      <div>
+        <h1>DataProtect OT Collector</h1>
+        <div class="topbar-sub">LabShock Cyber-Range // OT Zone</div>
+      </div>
     </div>
     <div class="status-wrap">
+      <span id="sys-clock">--:--:--</span>
+      <div id="live-badge"><span class="dot"></span>Live</div>
       <span id="health-pill" class="pill offline">offline</span>
       <span id="rate-pill" class="pill">0 ev/s</span>
     </div>
@@ -37,13 +45,21 @@
     <section id="tab-settings" class="tab"></section>
   </main>
 
+  <div class="statusbar">
+    <span><span id="sb-health-dot" class="sb-dot bad"></span><span id="sb-health-txt">collector offline</span></span>
+    <span id="sb-event-count">events: —</span>
+    <span id="sb-zone">zone: OT</span>
+    <span id="event-ticker">awaiting stream...</span>
+  </div>
+
   <dialog id="json-modal">
-    <h3>Event JSON</h3>
+    <h3>Event Detail</h3>
     <pre id="json-modal-body"></pre>
-    <button id="json-modal-close">Close</button>
+    <div style="margin-top:12px;display:flex;gap:8px;">
+      <button id="json-modal-close" class="primary">Close</button>
+    </div>
   </dialog>
 
   <script src="/app.js"></script>
 </body>
 </html>
-
