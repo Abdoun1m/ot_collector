@@ -412,7 +412,7 @@ func TestFilterEngine_WildcardMatchesGDSAgent(t *testing.T) {
 		},
 	})
 	evt := &event.Event{SourceType: "gds_agent", Tags: map[string]string{}}
-	d := eng.EvaluateRulesOnly(evt)
+	d := eng.Evaluate(evt)
 	if d.MatchedRuleID != "r-wild" {
 		t.Errorf("expected rule r-wild to match gds_agent, got matched_rule_id=%q", d.MatchedRuleID)
 	}
@@ -438,7 +438,7 @@ func TestFilterEngine_StoreAndForwardAction(t *testing.T) {
 		},
 	})
 	evt := &event.Event{SourceType: "gds_agent", Message: "x", Tags: map[string]string{}}
-	d := eng.EvaluateRulesOnly(evt)
+	d := eng.Evaluate(evt)
 	if !d.Store {
 		t.Error("Store should be true for store_and_forward action")
 	}
@@ -510,7 +510,7 @@ func TestProcessNormalized_CollectorDecisionTag(t *testing.T) {
 	}
 }
 
-// ── API events bypass dedup (two identical messages both stored) ──
+// ── API events are not deduped unless the matched matrix rule enables dedup ──
 
 func TestProcessNormalized_APIBypassesDedup(t *testing.T) {
 	dmz := newMockDMZ()
@@ -540,6 +540,47 @@ func TestProcessNormalized_APIBypassesDedup(t *testing.T) {
 }
 
 // ── normalizeSourceType covers all documented aliases ──
+
+func TestIngest_APIAndSyslogUseSameMatrixDedup(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := storage.NewJSONLStore(tmpDir+"/events.jsonl", slog.Default())
+	eng := filter.New()
+	eng.SetRules([]config.RuleConfig{
+		{
+			ID: "dedup-ews", Enabled: true,
+			SourceType: "ews", Asset: "*", Category: "*", Severity: "*", Operation: "*",
+			Action: "store_only", StoreLocally: true, DedupWindowSeconds: 60,
+		},
+	})
+	fwdStore, err := config.NewForwardingStore(tmpDir + "/forwarding.json")
+	if err != nil {
+		t.Fatalf("NewForwardingStore: %v", err)
+	}
+	_ = fwdStore.Replace(config.ForwardingConfig{Enabled: true, ForwardOnlyFiltered: false})
+	proc := &Processor{
+		zone: "OT", store: store, forwarder: forwarder.New("", slog.Default(), 5),
+		stats: NewStats(), filterEngine: eng,
+		streamHub: api.NewStreamHub(), forwardingCfg: fwdStore,
+		logger: slog.Default(), forwardTimeout: 5,
+	}
+
+	first := event.Event{ID: "api-dedup-first", SourceType: "ews", AssetIP: "192.168.1.50", Message: "same heartbeat"}
+	second := event.Event{ID: "syslog-dedup-second", SourceType: "ews", AssetIP: "192.168.1.50", Message: "same heartbeat"}
+	proc.ingest(first, "api")
+	proc.ingest(second, "syslog_udp")
+
+	if _, ok := readEventByID(t, store, first.ID); !ok {
+		t.Fatalf("first API event should be stored")
+	}
+	if _, ok := readEventByID(t, store, second.ID); ok {
+		t.Fatalf("second syslog event should be dropped by the same matrix dedup rule")
+	}
+	summary := proc.stats.Summary()
+	byRule := summary["by_rule"].(map[string]int64)
+	if byRule["dedup-ews"] == 0 {
+		t.Fatalf("expected dedup-ews rule to be counted, got %+v", byRule)
+	}
+}
 
 func TestNormalizeSourceType_AllAliases(t *testing.T) {
 	cases := []struct{ in, want string }{

@@ -585,9 +585,15 @@ function renderRules() {
       <td><input data-f="category"    data-i="${idx}" value="${escAttr(r.category || '*')}"    style="width:100px" /></td>
       <td><input data-f="severity"    data-i="${idx}" value="${escAttr(r.severity || '*')}"    style="width:70px" /></td>
       <td><input data-f="operation"   data-i="${idx}" value="${escAttr(r.operation || '*')}"   style="width:70px" /></td>
+      <td><input data-f="event_type"  data-i="${idx}" value="${escAttr(r.event_type || '*')}"  style="width:90px" /></td>
+      <td><input data-f="message_contains" data-i="${idx}" value="${escAttr(r.message_contains || '')}" style="width:120px" /></td>
+      <td>
+        <input data-f="tag_key" data-i="${idx}" value="${escAttr(r.tag_key || '')}" style="width:80px" placeholder="key" />
+        <input data-f="tag_value" data-i="${idx}" value="${escAttr(r.tag_value || '')}" style="width:70px;margin-top:4px" placeholder="value" />
+      </td>
       <td>
         <select data-f="action" data-i="${idx}">
-          ${['keep','drop','sample','forward_only','store_only'].map(a =>
+          ${['keep','drop','sample','forward_only','store_only','store_and_forward'].map(a =>
             `<option value="${a}" ${r.action === a ? 'selected' : ''}>${a}</option>`
           ).join('')}
         </select>
@@ -596,11 +602,22 @@ function renderRules() {
         <input type="number" min="0" max="1" step="0.05" data-f="sample_rate" data-i="${idx}"
           value="${Number(r.sample_rate ?? 1).toFixed(2)}" style="width:60px" />
       </td>
+      <td>
+        <input type="number" min="0" step="1" data-f="dedup_window_seconds" data-i="${idx}"
+          value="${Number(r.dedup_window_seconds ?? 0)}" style="width:60px" />
+      </td>
+      <td>
+        <input type="number" min="0" step="1" data-f="rate_limit_per_second" data-i="${idx}"
+          value="${Number(r.rate_limit_per_second ?? 0)}" style="width:60px" />
+      </td>
       <td style="text-align:center">
         <input type="checkbox" data-f="forward_to_dmz" data-i="${idx}" ${r.forward_to_dmz ? 'checked' : ''} />
       </td>
       <td style="text-align:center">
         <input type="checkbox" data-f="store_locally" data-i="${idx}" ${r.store_locally ? 'checked' : ''} />
+      </td>
+      <td style="text-align:center">
+        <input type="checkbox" data-f="show_in_ui" data-i="${idx}" ${(r.show_in_ui ?? true) ? 'checked' : ''} />
       </td>
       <td><input data-f="notes" data-i="${idx}" value="${escAttr(r.notes || '')}" style="width:100px" /></td>
       <td style="white-space:nowrap">
@@ -658,9 +675,6 @@ function renderForwarding() {
   // Toggles
   const enEl = document.getElementById('f-enabled');
   if (enEl) enEl.checked = !!f.enabled;
-
-  const filtEl = document.getElementById('f-only-filtered');
-  if (filtEl) filtEl.checked = !!f.forward_only_filtered_events;
 
   // Status card
   const statusVal = document.getElementById('fwd-status-value');
@@ -940,10 +954,17 @@ function bindAll() {
       category: '*',
       severity: '*',
       operation: '*',
+      event_type: '*',
+      message_contains: '',
+      tag_key: '',
+      tag_value: '',
       action: 'keep',
       sample_rate: 1,
+      dedup_window_seconds: 0,
+      rate_limit_per_second: 0,
       forward_to_dmz: false,
       store_locally: true,
+      show_in_ui: true,
       notes: '',
     });
     renderRules();
@@ -985,7 +1006,7 @@ function bindAll() {
         body: JSON.stringify(payload),
       });
       resultEl.style.display = 'block';
-      const matched = !!(res.matched_rule);
+      const matched = !!(res.matched_rule_id);
       resultEl.innerHTML = `
         <div class="rule-result-card ${matched ? 'matched' : 'no-match'}">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
@@ -994,12 +1015,13 @@ function bindAll() {
             </span>
           </div>
           ${[
-            ['Matched Rule', res.matched_rule || '—'],
-            ['Action',       res.action || '—'],
+            ['Matched Rule', res.matched_rule_id || '—'],
+            ['Drop',         String(res.drop ?? '—')],
             ['Forward',      String(res.forward ?? '—')],
             ['Store',        String(res.store ?? '—')],
-            ['Sample Result',res.sample_result || '—'],
-            ['Reason',       res.reason || '—'],
+            ['Show',         String(res.show ?? '—')],
+            ['Sampled',      String(res.sampled ?? '—')],
+            ['Reason',       res.decision_reason || '—'],
           ].map(([k, v]) => `
             <div class="test-result-row">
               <span class="test-result-key">${esc(k)}</span>
@@ -1019,7 +1041,6 @@ function bindAll() {
     if (!state.forwarding) return;
     state.forwarding.dmz_collector_url = document.getElementById('f-url')?.value.trim() || '';
     state.forwarding.enabled           = document.getElementById('f-enabled')?.checked || false;
-    state.forwarding.forward_only_filtered_events = document.getElementById('f-only-filtered')?.checked || false;
     try {
       await api('/config/forwarding', {
         method: 'POST',

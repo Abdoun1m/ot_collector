@@ -42,17 +42,17 @@ type Stats struct {
 	forwardedCount   int64
 	failedForwardCnt int64
 
-	bySeverity   map[string]int64
-	bySourceType map[string]int64
-	byCategory   map[string]int64
-	byAsset      map[string]int64
-	byCommand    map[string]int64
-	byRule       map[string]int64
-	byDecision   map[string]int64
-	bySourceIP   map[string]int64
-	timeline     map[string]int64
-	sources      map[string]sourceStats
-	lastEventAt  string
+	bySeverity    map[string]int64
+	bySourceType  map[string]int64
+	byCategory    map[string]int64
+	byAsset       map[string]int64
+	byCommand     map[string]int64
+	byRule        map[string]int64
+	byDecision    map[string]int64
+	bySourceIP    map[string]int64
+	timeline      map[string]int64
+	sources       map[string]sourceStats
+	lastEventAt   string
 	lastForwardOK string
 
 	rateSecond int64
@@ -281,15 +281,15 @@ func topN(m map[string]int64, n int) []map[string]any {
 type Processor struct {
 	mu sync.RWMutex // protects forwarder and forwardQueue hot-swaps
 
-	zone          string
-	store         *storage.JSONLStore
-	forwarder     *forwarder.Forwarder
-	forwardQueue  *forwarder.ForwardQueue
-	stats         *Stats
-	filterEngine  *filter.Engine
-	streamHub     *api.StreamHub
-	forwardingCfg *config.ForwardingStore
-	logger        *slog.Logger
+	zone           string
+	store          *storage.JSONLStore
+	forwarder      *forwarder.Forwarder
+	forwardQueue   *forwarder.ForwardQueue
+	stats          *Stats
+	filterEngine   *filter.Engine
+	streamHub      *api.StreamHub
+	forwardingCfg  *config.ForwardingStore
+	logger         *slog.Logger
 	forwardTimeout int
 }
 
@@ -392,14 +392,14 @@ func (p *Processor) ProcessRaw(raw, sourceIP, transport string) {
 }
 
 // ProcessNormalized is the API ingestion entry point (POST /events and
-// forwarding pipeline tests). Rate-limiting and deduplication are skipped.
+// forwarding pipeline tests).
 func (p *Processor) ProcessNormalized(evt event.Event) {
 	p.ingest(evt, "api")
 }
 
 // ProcessTestEvent routes POST /test-event events through the same ingest
 // pipeline with a distinct ingestion_path so they are identifiable in logs
-// and tags. Rate-limiting and deduplication are skipped.
+// and tags.
 func (p *Processor) ProcessTestEvent(evt event.Event) {
 	p.ingest(evt, "api_test_event")
 }
@@ -434,19 +434,12 @@ func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 	evt.SourceType = normalizeSourceType(evt.SourceType)
 
 	// ── 3. Rule evaluation ─────────────────────────────────────────────────
-	var decision filter.Decision
-	if ingestionPath == "syslog_udp" || ingestionPath == "syslog_tcp" {
-		// Syslog paths get rate-limiting and deduplication.
-		decision = p.filterEngine.Evaluate(&evt)
-	} else {
-		// API / test paths: rules only — no flood controls.
-		decision = p.filterEngine.EvaluateRulesOnly(&evt)
-	}
+	decision := p.filterEngine.Evaluate(&evt)
 
 	// ── 4. Resolve actual forwarding intent ────────────────────────────────
-	// CRITICAL: if a rule matched, honour the rule's Forward flag.
-	// Only fall back to global ForwardOnlyFiltered when no rule matched.
-	// Without this, store_only rules would still forward via global config.
+	// The Rule Matrix is the only event-level forwarding authority. Global
+	// forwarding config can disable forwarding or change the URL, but it does
+	// not select which event types are forwarded.
 	fcfg := p.forwardingCfg.Get()
 	p.mu.RLock()
 	fwdEnabled := fcfg.Enabled && p.forwarder.Enabled()
@@ -454,17 +447,14 @@ func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 
 	var willForward bool
 	if !decision.Drop {
-		if decision.MatchedRuleID != "" {
-			willForward = decision.Forward && fwdEnabled
-		} else {
-			willForward = !fcfg.ForwardOnlyFiltered && fwdEnabled
-		}
+		willForward = decision.Forward && fwdEnabled
 	}
 
 	// ── 5. Enrich tags ─────────────────────────────────────────────────────
 	evt.Tags["ingestion_path"] = ingestionPath
 	evt.Tags["collector_decision"] = decisionLabel(decision, willForward)
 	evt.Tags["collector_decision_hint"] = decisionHint(decision)
+	evt.Tags["decision_reason"] = decision.Reason
 	evt.Tags["siem_index_hint"] = siemIndexHint(evt.SourceType)
 	evt.Tags["splunk_sourcetype"] = splunkSourcetype(evt.SourceType)
 	if decision.MatchedRuleID != "" {
@@ -488,6 +478,13 @@ func (p *Processor) ingest(evt event.Event, ingestionPath string) {
 
 	// ── 7. Drop ────────────────────────────────────────────────────────────
 	if decision.Drop {
+		if decision.Store {
+			if err := p.store.Append(evt); err != nil {
+				p.logger.Error("failed to append dropped event", "error", err, "event_id", evt.ID)
+			} else if decision.Show {
+				p.streamHub.Publish(evt)
+			}
+		}
 		p.stats.AddDropped(decision.MatchedRuleID, decision.Reason, decision.Sampled)
 		p.logger.Debug("event dropped", "event_id", evt.ID, "reason", decision.Reason)
 		return
@@ -579,7 +576,7 @@ func (p *Processor) SetRules(rules []config.RuleConfig) {
 
 func (p *Processor) RuleTest(evt event.Event) filter.Decision {
 	evt.SourceType = normalizeSourceType(evt.SourceType)
-	return p.filterEngine.EvaluateRulesOnly(&evt)
+	return p.filterEngine.Evaluate(&evt)
 }
 
 // ForwardingConfig returns the current forwarding config, with live queue stats.

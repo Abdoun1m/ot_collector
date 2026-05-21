@@ -147,11 +147,11 @@ func (s *JSONLStore) Repair() (RepairReport, error) {
 		}
 		return report, err
 	}
-	defer in.Close()
 
 	tmp := s.path + ".repair.tmp"
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
+		_ = in.Close()
 		return report, err
 	}
 
@@ -207,6 +207,10 @@ func (s *JSONLStore) Repair() (RepairReport, error) {
 		return report, err
 	}
 	if err := out.Close(); err != nil {
+		_ = in.Close()
+		return report, err
+	}
+	if err := in.Close(); err != nil {
 		return report, err
 	}
 	return report, os.Rename(tmp, s.path)
@@ -233,7 +237,7 @@ func sanitizeJSONLLine(line []byte) []byte {
 }
 
 func matchesQuery(e event.Event, q EventQuery) bool {
-	if q.SourceType != "" && !strings.EqualFold(e.SourceType, q.SourceType) {
+	if q.SourceType != "" && canonicalSourceType(e.SourceType) != canonicalSourceType(q.SourceType) {
 		return false
 	}
 	if q.Severity != "" && !strings.EqualFold(e.Severity, q.Severity) {
@@ -260,4 +264,19 @@ func matchesQuery(e event.Event, q EventQuery) bool {
 		}
 	}
 	return true
+}
+
+func canonicalSourceType(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "-", "_")
+	switch s {
+	case "opnsense":
+		return "firewall"
+	case "fuxa":
+		return "scada"
+	case "openplc":
+		return "plc"
+	default:
+		return s
+	}
 }
