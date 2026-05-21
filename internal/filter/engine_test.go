@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/Abdoun1m/ot_collector/internal/config"
@@ -116,5 +117,32 @@ func TestFirstMatchingRuleWins(t *testing.T) {
 	d := e.Evaluate(&event.Event{SourceType: "opcua", Tags: map[string]string{}})
 	if d.MatchedRuleID != "first" || d.Drop {
 		t.Fatalf("first rule should win, got %+v", d)
+	}
+}
+
+func TestDefaultFirewallPassRuleBeatsGenericErrorForward(t *testing.T) {
+	store, err := config.NewRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	if err != nil {
+		t.Fatalf("new rule store: %v", err)
+	}
+	e := New()
+	e.SetRules(store.All())
+
+	evt := event.Event{
+		SourceType:    "firewall",
+		AssetIP:       "192.168.1.254",
+		Severity:      "error",
+		EventCategory: "error",
+		Message:       "firewall_pass",
+		Raw:           `filterlog pass 192.168.10.20 -> 192.168.1.62`,
+		Tags:          map[string]string{},
+	}
+
+	d := e.Evaluate(&evt)
+	if d.MatchedRuleID != "rule-firewall-pass-sample" {
+		t.Fatalf("expected firewall pass sampler before generic error forward, got %+v", d)
+	}
+	if d.Forward {
+		t.Fatalf("firewall pass noise must not forward to DMZ, got %+v", d)
 	}
 }
